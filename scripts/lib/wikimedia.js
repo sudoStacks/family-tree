@@ -6,7 +6,9 @@ import axios from "axios";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "../..");
-let loggedResponseShape = false;
+
+const WIKIMEDIA_USER_AGENT =
+  "family-tree-book-generator/1.0 (github.com/sudostacks/family-tree; genealogy research tool)";
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -47,19 +49,16 @@ export async function getCachedOrFetchCommonsImage(query) {
   console.log("Wikimedia search:", query);
   let res;
   try {
-    res = await axios.get(url, { timeout: 10_000 });
+    res = await axios.get(url, {
+      timeout: 10_000,
+      headers: {
+        "User-Agent": WIKIMEDIA_USER_AGENT,
+        Accept: "application/json",
+      },
+    });
   } catch (error) {
-    console.log("Wikimedia error:", error?.message || String(error));
+    console.log("Wikimedia error:", query, "-", error?.message || String(error));
     return { cachePath: null, metadata: null, source: "error" };
-  }
-
-  if (!loggedResponseShape) {
-    loggedResponseShape = true;
-    try {
-      console.log("Raw Wikimedia response keys:", Object.keys(res?.data || {}));
-    } catch {
-      // ignore
-    }
   }
 
   const pages = res?.data?.query?.pages ? Object.values(res.data.query.pages) : [];
@@ -100,10 +99,17 @@ export async function getCachedOrFetchCommonsImage(query) {
   if (!best) return { cachePath: null, metadata: null, source: "none" };
 
   try {
-    const img = await axios.get(best.thumb, { responseType: "arraybuffer", timeout: 10_000 });
+    const img = await axios.get(best.thumb, {
+      responseType: "arraybuffer",
+      timeout: 10_000,
+      headers: {
+        "User-Agent": WIKIMEDIA_USER_AGENT,
+        Accept: "application/json",
+      },
+    });
     fs.writeFileSync(cachePath, Buffer.from(img.data));
   } catch (error) {
-    console.log("Wikimedia error:", error?.message || String(error));
+    console.log("Wikimedia error:", query, "-", error?.message || String(error));
     return { cachePath: null, metadata: best, source: "download-error" };
   }
   return { cachePath, metadata: best, source: "wikimedia" };

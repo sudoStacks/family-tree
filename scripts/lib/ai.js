@@ -10,6 +10,10 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "../..");
 
+let ollamaChecked = false;
+let ollamaReachable = false;
+let loggedFirstNarrative = false;
+
 function cleanName(raw) {
   if (!raw) return "";
   // Remove GEDCOM surname slashes: /Smith/ or /SMITH/
@@ -161,26 +165,72 @@ function templateNarrative(person, context) {
   return templates[idx]();
 }
 
+async function checkOllamaConnectivity({ baseUrl, model }) {
+  if (ollamaChecked) return ollamaReachable;
+  ollamaChecked = true;
+  try {
+    await axios.get(`${baseUrl.replace(/\/$/, "")}/api/tags`, { timeout: 5_000 });
+    ollamaReachable = true;
+    console.log(`Ollama connected: ${model}`);
+    return true;
+  } catch (error) {
+    console.warn(`Ollama unreachable at ${baseUrl} (${error?.message || String(error)}); falling back to templates.`);
+    ollamaReachable = false;
+    return false;
+  }
+}
+
 export async function getNarrative(person, context, options) {
   const personId = person?.id || "unknown";
   const refresh = Boolean(options?.refresh);
   const noAi = Boolean(options?.noAi);
+  const personNameForLog = cleanName(person?.name?.full) || personId;
 
   // --no-ai mode must never call Ollama and must not touch the narrative cache.
   // This keeps "dry" or privacy-sensitive runs from writing any derived text to disk.
   if (noAi) {
+    if (!loggedFirstNarrative) {
+      loggedFirstNarrative = true;
+      const model = process.env.OLLAMA_MODEL || "";
+      const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+      console.log(`AI config: model=${model || "(unset)"} base=${baseUrl} noAi=${noAi}`);
+    }
+    console.log(`Generating narrative for: ${personNameForLog} (via template)`);
     const text = templateNarrative(person, context);
     return { text, source: "template" };
   }
 
   if (!refresh) {
     const cached = readCachedNarrative(personId);
-    if (cached) return { text: cached, source: "cache" };
+    if (cached) {
+      if (!loggedFirstNarrative) {
+        loggedFirstNarrative = true;
+        const model = process.env.OLLAMA_MODEL || "";
+        const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+        console.log(`AI config: model=${model || "(unset)"} base=${baseUrl} noAi=${noAi}`);
+      }
+      console.log(`Generating narrative for: ${personNameForLog} (via template)`);
+      return { text: cached, source: "cache" };
+    }
   }
 
   const model = process.env.OLLAMA_MODEL || "";
   const baseUrl = process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+  if (!loggedFirstNarrative) {
+    loggedFirstNarrative = true;
+    console.log(`AI config: model=${model || "(unset)"} base=${baseUrl} noAi=${noAi}`);
+  }
+
   if (!model) {
+    console.log(`Generating narrative for: ${personNameForLog} (via template)`);
+    const text = templateNarrative(person, context);
+    writeCachedNarrative(personId, text);
+    return { text, source: "template" };
+  }
+
+  const ok = await checkOllamaConnectivity({ baseUrl, model });
+  if (!ok) {
+    console.log(`Generating narrative for: ${personNameForLog} (via template)`);
     const text = templateNarrative(person, context);
     writeCachedNarrative(personId, text);
     return { text, source: "template" };
@@ -208,6 +258,7 @@ export async function getNarrative(person, context, options) {
     .join(" ");
 
   try {
+    console.log(`Generating narrative for: ${personNameForLog} (via Ollama)`);
     const res = await axios.post(
       `${baseUrl.replace(/\/$/, "")}/api/generate`,
       { model, prompt, stream: false },
@@ -217,7 +268,9 @@ export async function getNarrative(person, context, options) {
     if (!text) throw new Error("Empty response");
     writeCachedNarrative(personId, text);
     return { text, source: "ollama" };
-  } catch {
+  } catch (error) {
+    console.warn(`Ollama generate failed (${error?.message || String(error)}); falling back to templates.`);
+    console.log(`Generating narrative for: ${personNameForLog} (via template)`);
     const text = templateNarrative(person, context);
     writeCachedNarrative(personId, text);
     return { text, source: "template" };

@@ -11,6 +11,9 @@ const projectRoot = path.join(__dirname, "../..");
 
 const PLACE_CACHE_DIR = path.join(projectRoot, "data", "place-cache");
 
+const WIKIMEDIA_USER_AGENT =
+  "family-tree-book-generator/1.0 (github.com/sudostacks/family-tree; genealogy research tool)";
+
 let lastWikipediaCallAt = 0;
 
 function sleep(ms) {
@@ -78,7 +81,10 @@ export async function getPlaceSummary(placeName, decade) {
   try {
     const res = await axios.get(url, {
       timeout: 20_000,
-      headers: { "User-Agent": "family-tree (public domain summary fetch)" },
+      headers: {
+        "User-Agent": WIKIMEDIA_USER_AGENT,
+        Accept: "application/json",
+      },
     });
     const extract = res?.data?.extract || "";
     const summary = firstTwoSentences(extract);
