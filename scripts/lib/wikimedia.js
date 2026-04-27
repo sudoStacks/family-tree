@@ -6,6 +6,7 @@ import axios from "axios";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "../..");
+let loggedResponseShape = false;
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -29,6 +30,7 @@ export async function getCachedOrFetchCommonsImage(query) {
   const cachePath = imageCachePath(query);
   if (fs.existsSync(cachePath)) return { cachePath, metadata: null, source: "cache" };
 
+  ensureDir(path.join(projectRoot, "data", "image-cache"));
   ensureDir(path.dirname(cachePath));
 
   const url =
@@ -42,7 +44,24 @@ export async function getCachedOrFetchCommonsImage(query) {
     "&iiurlwidth=800" +
     "&format=json";
 
-  const res = await axios.get(url, { timeout: 30_000 });
+  console.log("Wikimedia search:", query);
+  let res;
+  try {
+    res = await axios.get(url, { timeout: 10_000 });
+  } catch (error) {
+    console.log("Wikimedia error:", error?.message || String(error));
+    return { cachePath: null, metadata: null, source: "error" };
+  }
+
+  if (!loggedResponseShape) {
+    loggedResponseShape = true;
+    try {
+      console.log("Raw Wikimedia response keys:", Object.keys(res?.data || {}));
+    } catch {
+      // ignore
+    }
+  }
+
   const pages = res?.data?.query?.pages ? Object.values(res.data.query.pages) : [];
 
   const candidates = pages
@@ -75,11 +94,17 @@ export async function getCachedOrFetchCommonsImage(query) {
     .filter((c) => c.thumb && !c.isSvg)
     .sort((a, b) => b.score - a.score);
 
+  console.log("Wikimedia results:", candidates.length, "images");
+
   const best = candidates[0] || null;
   if (!best) return { cachePath: null, metadata: null, source: "none" };
 
-  const img = await axios.get(best.thumb, { responseType: "arraybuffer", timeout: 60_000 });
-  fs.writeFileSync(cachePath, Buffer.from(img.data));
+  try {
+    const img = await axios.get(best.thumb, { responseType: "arraybuffer", timeout: 10_000 });
+    fs.writeFileSync(cachePath, Buffer.from(img.data));
+  } catch (error) {
+    console.log("Wikimedia error:", error?.message || String(error));
+    return { cachePath: null, metadata: best, source: "download-error" };
+  }
   return { cachePath, metadata: best, source: "wikimedia" };
 }
-

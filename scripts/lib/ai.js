@@ -10,6 +10,12 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, "../..");
 
+function cleanName(raw) {
+  if (!raw) return "";
+  // Remove GEDCOM surname slashes: /Smith/ or /SMITH/
+  return String(raw).replace(/\s*\/[^/]*\/\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
 }
@@ -62,15 +68,15 @@ function hashString(value) {
 }
 
 function templateNarrative(person, context) {
-  const name = String(person?.name?.full || "").replace(/\s+/g, " ").trim() || "This person";
-  const first = firstWord(person?.name?.given || name) || "They";
+  const name = cleanName(String(person?.name?.full || "")).trim() || "This person";
+  const first = firstWord(cleanName(person?.name?.given || name)) || "They";
   const { subject } = pronouns(person?.sex);
   const birthDate = person?.birth?.date || "";
   const birthPlace = person?.birth?.place || "";
   const deathYear = yearFromISO(person?.death?.dateISO);
   const deathPlace = person?.death?.place || "";
   const birthYear = yearFromISO(person?.birth?.dateISO);
-  const surname = String(person?.name?.surname || "").replace(/\s+/g, " ").trim();
+  const surname = cleanName(String(person?.name?.surname || "")).replace(/\s+/g, " ").trim();
   const hasSpouseLink = Array.isArray(person?.familiesAsSpouse) && person.familiesAsSpouse.length > 0;
 
   const topEvent = context?.events?.[0]?.event || "";
@@ -180,8 +186,8 @@ export async function getNarrative(person, context, options) {
     return { text, source: "template" };
   }
 
-  const name = String(person?.name?.full || "").replace(/\s+/g, " ").trim();
-  const first = firstWord(person?.name?.given) || firstWord(name);
+  const name = cleanName(String(person?.name?.full || "")).replace(/\s+/g, " ").trim();
+  const first = firstWord(cleanName(person?.name?.given)) || firstWord(name);
   const birthDate = person?.birth?.date || "";
   const birthPlace = person?.birth?.place || "";
   const deathDate = person?.death?.date || "";
