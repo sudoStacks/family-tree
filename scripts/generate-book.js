@@ -176,6 +176,19 @@ function heading(text, level) {
   });
 }
 
+function body(text) {
+  return new Paragraph({
+    children: [
+      new TextRun({
+        text: String(text ?? ""),
+        font: "Arial",
+        size: 22,
+      }),
+    ],
+    spacing: { after: 120 },
+  });
+}
+
 function divider() {
   return new Paragraph({
     border: {

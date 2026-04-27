@@ -97,15 +97,16 @@ export async function getNarrative(person, context, options) {
   const refresh = Boolean(options?.refresh);
   const noAi = Boolean(options?.noAi);
 
+  // --no-ai mode must never call Ollama and must not touch the narrative cache.
+  // This keeps "dry" or privacy-sensitive runs from writing any derived text to disk.
+  if (noAi) {
+    const text = templateNarrative(person, context);
+    return { text, source: "template" };
+  }
+
   if (!refresh) {
     const cached = readCachedNarrative(personId);
     if (cached) return { text: cached, source: "cache" };
-  }
-
-  if (noAi) {
-    const text = templateNarrative(person, context);
-    writeCachedNarrative(personId, text);
-    return { text, source: "template" };
   }
 
   const model = process.env.OLLAMA_MODEL || "";
@@ -153,4 +154,3 @@ export async function getNarrative(person, context, options) {
     return { text, source: "template" };
   }
 }
-
