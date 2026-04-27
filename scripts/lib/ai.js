@@ -53,6 +53,14 @@ function yearFromISO(dateISO) {
   return Number.isFinite(year) ? year : null;
 }
 
+function hashString(value) {
+  // Deterministic hash for stable template selection (no randomness).
+  const s = String(value || "");
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i); // djb2 xor
+  return Math.abs(h);
+}
+
 function templateNarrative(person, context) {
   const name = String(person?.name?.full || "").replace(/\s+/g, " ").trim() || "This person";
   const first = firstWord(person?.name?.given || name) || "They";
@@ -62,34 +70,89 @@ function templateNarrative(person, context) {
   const deathYear = yearFromISO(person?.death?.dateISO);
   const deathPlace = person?.death?.place || "";
   const birthYear = yearFromISO(person?.birth?.dateISO);
+  const surname = String(person?.name?.surname || "").replace(/\s+/g, " ").trim();
+  const hasSpouseLink = Array.isArray(person?.familiesAsSpouse) && person.familiesAsSpouse.length > 0;
 
   const topEvent = context?.events?.[0]?.event || "";
   const topFact = context?.events?.[0]?.funFact || "";
 
-  const parts = [];
-  if (birthDate || birthPlace) {
-    const born = `born${birthDate ? ` on ${birthDate}` : ""}${birthPlace ? ` in ${birthPlace}` : ""}`;
-    parts.push(`${name} was ${born}.`);
-  } else if (birthYear) {
-    parts.push(`${name} was born around ${birthYear}.`);
-  } else {
-    parts.push(`${name} appears in the family record, though many details are still waiting to be discovered.`);
-  }
+  const bornClause = (() => {
+    if (birthDate || birthPlace) {
+      return `on ${birthDate || "an unknown day"}${birthPlace ? ` in ${birthPlace}` : ""}`;
+    }
+    if (birthYear) return `around ${birthYear}`;
+    return "at an unknown time";
+  })();
 
-  if (topEvent) {
-    parts.push(`${first} lived during a time of ${topEvent}.`);
-  }
-  if (topFact) {
-    parts.push(topFact);
-  }
+  const diedClause = (() => {
+    if (!deathYear && !deathPlace) return "";
+    const where = deathPlace ? ` in ${deathPlace}` : "";
+    return `${deathYear ? ` in ${deathYear}` : ""}${where}`.trim();
+  })();
 
-  if (deathYear || deathPlace) {
-    parts.push(
-      `${subject} passed away${deathYear ? ` in ${deathYear}` : ""}${deathPlace ? ` in ${deathPlace}` : ""}.`,
-    );
-  }
+  const eraLine = topEvent ? `${first} lived during the era of ${topEvent}.` : "";
+  const factLine = topFact ? topFact : "";
+  const familyLine = hasSpouseLink ? "Family records show at least one marriage connection." : "Family records suggest connections across generations.";
 
-  return parts.join(" ");
+  const closings = [
+    (age) => `${subject} passed away${diedClause ? ` ${diedClause}` : ""}${age ? ` at about age ${age}` : ""}.`,
+    (age) => `${subject} died${diedClause ? ` ${diedClause}` : ""}${age ? `, around age ${age}` : ""}.`,
+    (age) => `${subject}'s life ended${diedClause ? ` ${diedClause}` : ""}${age ? ` at roughly ${age}` : ""}.`,
+    (age) => `${subject} lived a life shaped by their time${age ? `, reaching about ${age} years` : ""}.`,
+  ];
+
+  const age = (() => {
+    const by = birthYear;
+    const dy = deathYear;
+    if (by === null || dy === null) return null;
+    const a = dy - by;
+    return a > 0 && a <= 110 ? a : null;
+  })();
+
+  const templates = [
+    () =>
+      [
+        birthPlace || birthDate ? `Born ${bornClause}, ${name} begins our story in the family record.` : `${name} appears in the family record.`,
+        eraLine,
+        familyLine,
+        factLine,
+        (deathYear || deathPlace) && closings[0](age),
+      ].filter(Boolean).join(" "),
+    () =>
+      [
+        `${name} came into the world ${bornClause}.`,
+        hasSpouseLink ? `${first} later appears in marriage records, marking a new chapter for the family.` : "",
+        eraLine,
+        factLine,
+        (deathYear || deathPlace) && closings[1](age),
+      ].filter(Boolean).join(" "),
+    () =>
+      [
+        surname ? `The ${surname} family welcomed ${first} ${bornClause}.` : `${name} was born ${bornClause}.`,
+        eraLine,
+        familyLine,
+        (deathYear || deathPlace) && closings[2](age),
+      ].filter(Boolean).join(" "),
+    () =>
+      [
+        birthPlace ? `Records show ${name} in ${birthPlace}${birthYear ? ` around ${birthYear}` : ""}.` : `${name} is recorded in the family tree.`,
+        eraLine,
+        factLine,
+        hasSpouseLink ? "Their relationships connect them to other branches of the tree." : "",
+        (deathYear || deathPlace) && closings[3](age),
+      ].filter(Boolean).join(" "),
+    () =>
+      [
+        `${name} was born ${bornClause}${birthYear ? ` (about ${birthYear})` : ""}.`,
+        factLine,
+        eraLine,
+        familyLine,
+        (deathYear || deathPlace) && closings[0](age),
+      ].filter(Boolean).join(" "),
+  ];
+
+  const idx = hashString(person?.id) % templates.length;
+  return templates[idx]();
 }
 
 export async function getNarrative(person, context, options) {

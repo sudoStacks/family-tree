@@ -46,6 +46,7 @@ function parseArgs(argv) {
   const args = {
     generation: null,
     surname: null,
+    surnames: null,
     refresh: false,
     noImages: false,
     noAi: false,
@@ -55,6 +56,7 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === "--generation") args.generation = Number(argv[i + 1] || ""), i++;
     else if (a === "--surname") args.surname = String(argv[i + 1] || ""), i++;
+    else if (a === "--surnames") args.surnames = String(argv[i + 1] || ""), i++;
     else if (a === "--refresh") args.refresh = true;
     else if (a === "--no-images") args.noImages = true;
     else if (a === "--no-ai") args.noAi = true;
@@ -82,6 +84,10 @@ function normalizeSurname(value) {
     .replace(/[^A-Z0-9' -]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function slugifySurname(value) {
+  return normalizeSurname(value).toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9'-]/g, "");
 }
 
 function displayName(person) {
@@ -616,7 +622,24 @@ async function generateBook() {
   const { generation, maxGen, childrenByParent, personById } = buildGenerationMap({ individuals, families });
   const events = readHistoricalContext();
 
-  const deceased = individuals.filter((p) => !isLiving(p));
+  const deceasedAll = individuals.filter((p) => !isLiving(p));
+  const surnameSet = (() => {
+    const s = new Set();
+    if (args.surnames) {
+      const parts = String(args.surnames)
+        .split(",")
+        .map((x) => x.trim())
+        .filter(Boolean);
+      for (const p of parts) s.add(normalizeSurname(p));
+    }
+    if (args.surname) s.add(normalizeSurname(args.surname));
+    return s;
+  })();
+  const hasSurnameFilter = surnameSet.size > 0;
+  const deceased = hasSurnameFilter
+    ? deceasedAll.filter((p) => surnameSet.has(normalizeSurname(p?.name?.surname)))
+    : deceasedAll;
+
   const surnameCounts = new Map();
   for (const p of deceased) {
     const s = normalizeSurname(p?.name?.surname);
@@ -636,18 +659,30 @@ async function generateBook() {
 
   const outDir = path.join(projectRoot, "reports");
   fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `family-book-${dateStr}.docx`);
+  const filterSlugParts = [];
+  if (hasSurnameFilter) {
+    const ordered = args.surnames
+      ? String(args.surnames).split(",").map((s) => s.trim()).filter(Boolean)
+      : args.surname
+        ? [String(args.surname)]
+        : [];
+    for (const s of ordered) filterSlugParts.push(slugifySurname(s));
+  }
+  const includeGen = Number.isFinite(args.generation) ? args.generation : null;
+  if (includeGen) filterSlugParts.push(`gen${includeGen}`);
+  const filterSlug = filterSlugParts.length ? `-${filterSlugParts.join("-")}` : "";
+  const outPath = path.join(outDir, `family-book${filterSlug}-${dateStr}.docx`);
 
   // Selection defaults + page estimate
   const includeSurname = args.surname ? normalizeSurname(args.surname) : null;
-  const includeGen = Number.isFinite(args.generation) ? args.generation : null;
+  const includeSurnames = hasSurnameFilter ? surnameSet : null;
 
   const genBuckets = new Map();
   for (const p of deceased) {
     const g = generation.get(p.id) || null;
     if (!g) continue;
     if (includeGen && g !== includeGen) continue;
-    if (includeSurname && normalizeSurname(p?.name?.surname) !== includeSurname) continue;
+    if (includeSurnames && !includeSurnames.has(normalizeSurname(p?.name?.surname))) continue;
     if (!genBuckets.has(g)) genBuckets.set(g, []);
     genBuckets.get(g).push(p);
   }
@@ -693,7 +728,7 @@ async function generateBook() {
   const estimatedPages = 6 + fullCount * 2 + briefCount * 1 + Math.ceil(rosterCount / 40) + genNumbers.length * 2;
   const pageCap = 500;
   let capMessage = null;
-  if (!includeGen && !includeSurname && estimatedPages > pageCap) {
+  if (!includeGen && !hasSurnameFilter && estimatedPages > pageCap) {
     capMessage = `Estimated pages (~${estimatedPages}) exceeds cap (${pageCap}). Consider using --generation or --surname.`;
   }
 
@@ -811,6 +846,7 @@ async function generateBook() {
   for (const g of genNumbers) {
     const bucket = featuredByGen.get(g);
     const allInGen = genBuckets.get(g) || [];
+    console.log(`Generating Generation ${g} (${allInGen.length} individuals)...`);
     const years = allInGen.map((p) => yearFromISO(p?.birth?.dateISO)).filter((y) => y !== null);
     const minY = years.length ? Math.min(...years) : null;
     const maxY = years.length ? Math.max(...years) : null;
@@ -1028,10 +1064,14 @@ async function generateBook() {
     let sidebarCounter = 0;
     const referencedRegionsThisGen = new Set();
     const genPlaceIndex = args.noPlaces ? null : buildGenerationPlaceIndex({ people: allInGen, familiesById, personById });
+    const fullPeople = bucket.full.filter((p) => !includeSurnames || includeSurnames.has(normalizeSurname(p?.name?.surname)));
+    let processedFull = 0;
 
-    for (const person of bucket.full) {
+    for (const person of fullPeople) {
       const personSurname = normalizeSurname(person?.name?.surname);
-      if (includeSurname && personSurname !== includeSurname) continue;
+      if (processedFull > 0 && processedFull % 25 === 0) {
+        console.log(`  → ${processedFull}/${fullPeople.length} individuals | Gen ${g} | ${personSurname || "UNKNOWN"}`);
+      }
 
       const personEvents = matchEventsForPerson(person, events);
       const { text: narrative, source } = await getNarrative(person, { events: personEvents }, { refresh: args.refresh, noAi: args.noAi });
@@ -1194,6 +1234,7 @@ async function generateBook() {
             const cityHint = Array.from(stat.cities.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] || "";
             const placeName = regionDisplayName(regionKey, cityHint);
             const decade = stat.years.length ? `${decadeFromYear(Math.min(...stat.years))}s` : null;
+            console.log(`  Place block: ${placeName}...`);
 
             let placeImage = null;
             if (!args.noImages) {
@@ -1274,6 +1315,7 @@ async function generateBook() {
       children.push(new Paragraph({ pageBreakBefore: true }));
 
       sidebarCounter++;
+      processedFull++;
       if (sidebarCounter % 4 === 0 && funFactsForGen.length) {
         const fact = funFactsForGen[sidebarCounter % funFactsForGen.length];
         children.push(shadedBlock({ text: `Did you know? ${fact.funFact}`, fill: "FFF9C4", borderColor: "F0C040" }));
@@ -1286,7 +1328,7 @@ async function generateBook() {
     // Brief cards
     for (const person of bucket.brief) {
       const personSurname = normalizeSurname(person?.name?.surname);
-      if (includeSurname && personSurname !== includeSurname) continue;
+      if (includeSurnames && !includeSurnames.has(personSurname)) continue;
       children.push(
         heading(`${displayName(person)} — In Brief`, 2),
         body(`Born: ${person?.birth?.date || "—"}${person?.birth?.place ? ` · ${person.birth.place}` : ""}`),
