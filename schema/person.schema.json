@@ -1,0 +1,211 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Person Record",
+  "description": "A lossless representation of a person from a GEDCOM file",
+  "type": "object",
+  "required": ["id", "name"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier (GEDCOM XREF, e.g., @I1@, @P1@)",
+      "pattern": "^@[A-Z]+\\d+@$"
+    },
+    "name": {
+      "type": "object",
+      "description": "Name components",
+      "required": ["full"],
+      "properties": {
+        "full": {
+          "type": "string",
+          "description": "Complete name as stored in GEDCOM"
+        },
+        "given": {
+          "type": ["string", "null"],
+          "description": "Given names"
+        },
+        "surname": {
+          "type": ["string", "null"],
+          "description": "Family surname"
+        },
+        "prefix": {
+          "type": ["string", "null"],
+          "description": "Name prefix (e.g., 'von', 'de')"
+        },
+        "suffix": {
+          "type": ["string", "null"],
+          "description": "Name suffix (e.g., 'Jr.', 'III')"
+        }
+      }
+    },
+    "sex": {
+      "type": ["string", "null"],
+      "enum": ["M", "F", "U", null],
+      "description": "Sex: M=Male, F=Female, U=Unknown"
+    },
+    "birth": {
+      "type": "object",
+      "description": "Birth event",
+      "properties": {
+        "date": {
+          "type": ["string", "null"],
+          "description": "GEDCOM date string (e.g., '12 MAR 1845')"
+        },
+        "dateISO": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 date (YYYY-MM-DD), null if unparseable"
+        },
+        "dateQualifier": {
+          "type": ["string", "null"],
+          "enum": ["ABT", "BEF", "AFT", "BET", null],
+          "description": "Date qualifier: ABT (about), BEF (before), AFT (after), BET (between)"
+        },
+        "place": {
+          "type": ["string", "null"],
+          "description": "Birth location"
+        },
+        "sourceRefs": {
+          "type": "array",
+          "description": "References to sources for this event",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "death": {
+      "type": "object",
+      "description": "Death event",
+      "properties": {
+        "date": {
+          "type": ["string", "null"],
+          "description": "GEDCOM date string"
+        },
+        "dateISO": {
+          "type": ["string", "null"],
+          "description": "ISO 8601 date"
+        },
+        "dateQualifier": {
+          "type": ["string", "null"],
+          "enum": ["ABT", "BEF", "AFT", "BET", null]
+        },
+        "place": {
+          "type": ["string", "null"],
+          "description": "Death location"
+        },
+        "sourceRefs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "burial": {
+      "type": "object",
+      "description": "Burial event",
+      "properties": {
+        "date": {
+          "type": ["string", "null"]
+        },
+        "place": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "description": "Additional life events (marriage, immigration, etc.)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Event type (e.g., CENS, EMIG, RESI, OCCU)"
+          },
+          "date": {
+            "type": ["string", "null"]
+          },
+          "dateISO": {
+            "type": ["string", "null"]
+          },
+          "place": {
+            "type": ["string", "null"]
+          },
+          "description": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "attributes": {
+      "type": "array",
+      "description": "Personal attributes (nationality, religion, occupation, etc.)",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "Attribute type (e.g., NATI, RELI, OCCU)"
+          },
+          "value": {
+            "type": ["string", "null"]
+          }
+        }
+      }
+    },
+    "familiesAsSpouse": {
+      "type": "array",
+      "description": "Family IDs where this person is a spouse",
+      "items": {
+        "type": "string",
+        "pattern": "^@[A-Z]+\\d+@$"
+      }
+    },
+    "familiesAsChild": {
+      "type": "array",
+      "description": "Family IDs where this person is a child",
+      "items": {
+        "type": "string",
+        "pattern": "^@[A-Z]+\\d+@$"
+      }
+    },
+    "notes": {
+      "type": "array",
+      "description": "Note IDs associated with this person",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sources": {
+      "type": "array",
+      "description": "Source IDs associated with this person",
+      "items": {
+        "type": "string"
+      }
+    },
+    "media": {
+      "type": "array",
+      "description": "Media (photo, document) references",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "type": {
+            "type": ["string", "null"],
+            "description": "MIME type or media type"
+          }
+        }
+      }
+    },
+    "rawTags": {
+      "type": "object",
+      "description": "Unprocessed GEDCOM tags for lossless preservation",
+      "additionalProperties": true
+    }
+  }
+}
