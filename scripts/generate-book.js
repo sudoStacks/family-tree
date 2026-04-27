@@ -1167,7 +1167,11 @@ async function generateBook() {
       const allPersonEvents = matchEventsForPerson(person, events);
       const narrativeEvents = selectNarrativeEvents(allPersonEvents);
       const lifeTimesEvents = selectLifeTimesEvents(allPersonEvents);
-      const { text: narrative, source } = await getNarrative(person, { events: narrativeEvents }, { refresh: args.refresh, noAi: args.noAi });
+      const { text: narrative, source } = await getNarrative(
+        person,
+        { events: allPersonEvents, familiesById, personById },
+        { refresh: args.refresh, noAi: args.noAi },
+      );
       if (source === "ollama") aiNarratives++;
       else templateNarratives++;
 

@@ -63,106 +63,209 @@ function yearFromISO(dateISO) {
   return Number.isFinite(year) ? year : null;
 }
 
-function hashString(value) {
-  // Deterministic hash for stable template selection (no randomness).
-  const s = String(value || "");
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i); // djb2 xor
-  return Math.abs(h);
+function safeTagEntries(rawTags, tag) {
+  const value = rawTags?.[tag];
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function tagValue(entry) {
+  if (entry === null || entry === undefined) return "";
+  if (typeof entry === "string") return entry.trim();
+  if (typeof entry?.value === "string") return entry.value.trim();
+  return "";
+}
+
+function tagTreeValue(entry, treeTag) {
+  const tree = Array.isArray(entry?.tree) ? entry.tree : [];
+  const hit = tree.find((node) => String(node?.tag || "").toUpperCase() === String(treeTag || "").toUpperCase());
+  return tagValue(hit);
+}
+
+function eventTypeLabel(tag) {
+  const t = String(tag || "").toUpperCase();
+  if (t === "MILI") return "Military";
+  if (t === "NATU") return "Naturalization";
+  if (t === "EMIG") return "Emigration";
+  if (t === "IMMI") return "Immigration";
+  if (t === "EDUC") return "Education";
+  if (t === "EVEN") return "Event";
+  return t;
+}
+
+function extractOccupation(person) {
+  const entries = safeTagEntries(person?.rawTags || {}, "OCCU");
+  if (!entries.length) return null;
+  const first = entries[0];
+  return tagValue(first) || tagTreeValue(first, "TYPE") || null;
+}
+
+function extractResidences(person) {
+  const entries = safeTagEntries(person?.rawTags || {}, "RESI");
+  const out = [];
+  for (const entry of entries) {
+    const date = tagTreeValue(entry, "DATE") || null;
+    const place = tagTreeValue(entry, "PLAC") || null;
+    if (date || place) out.push({ date, place });
+  }
+  return out;
+}
+
+function extractEvents(person) {
+  const rawTags = person?.rawTags || {};
+  const tags = ["MILI", "NATU", "EMIG", "IMMI", "EDUC", "EVEN"];
+  const out = [];
+  for (const tag of tags) {
+    const entries = safeTagEntries(rawTags, tag);
+    for (const entry of entries) {
+      const date = tagTreeValue(entry, "DATE") || null;
+      const place = tagTreeValue(entry, "PLAC") || null;
+      const description = tagValue(entry) || tagTreeValue(entry, "TYPE") || null;
+      out.push({
+        type: eventTypeLabel(tag),
+        date,
+        place,
+        description,
+      });
+    }
+  }
+  return out;
+}
+
+function pickContextForYear(events, targetYear) {
+  if (!Number.isFinite(targetYear) || !Array.isArray(events) || events.length === 0) return null;
+  const ranked = events
+    .filter((e) => Number.isFinite(Number(e?.startYear)))
+    .map((e) => ({ e, dist: Math.abs(Number(e.startYear) - targetYear) }))
+    .sort((a, b) => a.dist - b.dist);
+  return ranked[0]?.e || null;
+}
+
+function buildNarrativeContext(person, events, context = {}) {
+  const birthYear = person?.birth?.dateISO ? new Date(person.birth.dateISO).getFullYear() : null;
+  const deathYear = person?.death?.dateISO ? new Date(person.death.dateISO).getFullYear() : null;
+  const ageAtDeath = birthYear && deathYear ? deathYear - birthYear : null;
+
+  const stages = birthYear
+    ? {
+        birth: birthYear,
+        childhood: birthYear + 10,
+        comingOfAge: birthYear + 20,
+        peakLife: birthYear + 35,
+        lateLife: deathYear ? deathYear - 10 : birthYear + 60,
+      }
+    : null;
+
+  const familiesById = context?.familiesById || null;
+  const personById = context?.personById || null;
+  const marriages = [];
+  const childrenNames = [];
+  let childrenCount = 0;
+  const spouseFamilyIds = Array.isArray(person?.familiesAsSpouse) ? person.familiesAsSpouse : [];
+  for (const fid of spouseFamilyIds) {
+    const fam = familiesById?.get?.(fid);
+    if (!fam) continue;
+    const spouseId = fam.husband === person.id ? fam.wife : fam.husband;
+    const spouse = spouseId ? personById?.get?.(spouseId) : null;
+    const spouseName = spouse ? cleanName(spouse?.name?.full || "") : "";
+    const marriageYear = yearFromISO(fam?.marriage?.dateISO);
+    const marriagePlace = fam?.marriage?.place || "";
+    marriages.push(
+      [spouseName || "Unknown spouse", marriageYear ? `${marriageYear}` : "", marriagePlace ? `in ${marriagePlace}` : ""]
+        .filter(Boolean)
+        .join(", "),
+    );
+    const kids = Array.isArray(fam?.children) ? fam.children : [];
+    childrenCount += kids.length;
+    for (const childId of kids) {
+      const child = personById?.get?.(childId);
+      const first = firstWord(cleanName(child?.name?.given || child?.name?.full || ""));
+      if (first) childrenNames.push(first);
+    }
+  }
+
+  const knownFacts = {
+    birthDate: person?.birth?.date || null,
+    birthPlace: person?.birth?.place || null,
+    deathDate: person?.death?.date || null,
+    deathPlace: person?.death?.place || null,
+    ageAtDeath,
+    sex: person?.sex || null,
+    marriages,
+    childrenCount,
+    childrenNames: Array.from(new Set(childrenNames)).slice(0, 10),
+    occupation: extractOccupation(person),
+    residences: extractResidences(person),
+    otherEvents: extractEvents(person),
+  };
+
+  return {
+    stages,
+    knownFacts,
+    birthYear,
+    deathYear,
+    contextAtBirth: pickContextForYear(events, stages?.birth),
+    contextAtChildhood: pickContextForYear(events, stages?.childhood),
+    contextAtAdulthood: pickContextForYear(events, stages?.comingOfAge),
+  };
+}
+
+function formatEventLine(event) {
+  if (!event) return "No specific context recorded.";
+  const label = String(event?.event || "").trim();
+  const fact = String(event?.funFact || "").trim();
+  if (label && fact) return `${label} — ${fact}`;
+  return label || fact || "No specific context recorded.";
+}
+
+function formatRecordedEvents(otherEvents) {
+  if (!Array.isArray(otherEvents) || otherEvents.length === 0) return "No additional events recorded";
+  return otherEvents
+    .slice(0, 8)
+    .map((e) =>
+      [e?.type || "Event", e?.date || "", e?.place ? `in ${e.place}` : "", e?.description || ""]
+        .filter(Boolean)
+        .join(" - "),
+    )
+    .join("\n  - ");
+}
+
+function formatResidences(residences) {
+  if (!Array.isArray(residences) || residences.length === 0) return "";
+  return residences
+    .slice(0, 6)
+    .map((r) => [r?.date || "", r?.place || ""].filter(Boolean).join(" "))
+    .filter(Boolean)
+    .join(", ");
 }
 
 function templateNarrative(person, context) {
   const name = cleanName(String(person?.name?.full || "")).trim() || "This person";
-  const first = firstWord(cleanName(person?.name?.given || name)) || "They";
-  const { subject } = pronouns(person?.sex);
-  const birthDate = person?.birth?.date || "";
-  const birthPlace = person?.birth?.place || "";
-  const deathYear = yearFromISO(person?.death?.dateISO);
-  const deathPlace = person?.death?.place || "";
-  const birthYear = yearFromISO(person?.birth?.dateISO);
-  const surname = cleanName(String(person?.name?.surname || "")).replace(/\s+/g, " ").trim();
-  const hasSpouseLink = Array.isArray(person?.familiesAsSpouse) && person.familiesAsSpouse.length > 0;
-
-  const topEvent = context?.events?.[0]?.event || "";
-  const topFact = context?.events?.[0]?.funFact || "";
-
-  const bornClause = (() => {
-    if (birthDate || birthPlace) {
-      return `on ${birthDate || "an unknown day"}${birthPlace ? ` in ${birthPlace}` : ""}`;
-    }
-    if (birthYear) return `around ${birthYear}`;
-    return "at an unknown time";
-  })();
-
-  const diedClause = (() => {
-    if (!deathYear && !deathPlace) return "";
-    const where = deathPlace ? ` in ${deathPlace}` : "";
-    return `${deathYear ? ` in ${deathYear}` : ""}${where}`.trim();
-  })();
-
-  const eraLine = topEvent ? `${first} lived during the era of ${topEvent}.` : "";
-  const factLine = topFact ? topFact : "";
-  const familyLine = hasSpouseLink ? "Family records show at least one marriage connection." : "Family records suggest connections across generations.";
-
-  const closings = [
-    (age) => `${subject} passed away${diedClause ? ` ${diedClause}` : ""}${age ? ` at about age ${age}` : ""}.`,
-    (age) => `${subject} died${diedClause ? ` ${diedClause}` : ""}${age ? `, around age ${age}` : ""}.`,
-    (age) => `${subject}'s life ended${diedClause ? ` ${diedClause}` : ""}${age ? ` at roughly ${age}` : ""}.`,
-    (age) => `${subject} lived a life shaped by their time${age ? `, reaching about ${age} years` : ""}.`,
-  ];
-
-  const age = (() => {
-    const by = birthYear;
-    const dy = deathYear;
-    if (by === null || dy === null) return null;
-    const a = dy - by;
-    return a > 0 && a <= 110 ? a : null;
-  })();
-
-  const templates = [
-    () =>
-      [
-        birthPlace || birthDate ? `Born ${bornClause}, ${name} begins our story in the family record.` : `${name} appears in the family record.`,
-        eraLine,
-        familyLine,
-        factLine,
-        (deathYear || deathPlace) && closings[0](age),
-      ].filter(Boolean).join(" "),
-    () =>
-      [
-        `${name} came into the world ${bornClause}.`,
-        hasSpouseLink ? `${first} later appears in marriage records, marking a new chapter for the family.` : "",
-        eraLine,
-        factLine,
-        (deathYear || deathPlace) && closings[1](age),
-      ].filter(Boolean).join(" "),
-    () =>
-      [
-        surname ? `The ${surname} family welcomed ${first} ${bornClause}.` : `${name} was born ${bornClause}.`,
-        eraLine,
-        familyLine,
-        (deathYear || deathPlace) && closings[2](age),
-      ].filter(Boolean).join(" "),
-    () =>
-      [
-        birthPlace ? `Records show ${name} in ${birthPlace}${birthYear ? ` around ${birthYear}` : ""}.` : `${name} is recorded in the family tree.`,
-        eraLine,
-        factLine,
-        hasSpouseLink ? "Their relationships connect them to other branches of the tree." : "",
-        (deathYear || deathPlace) && closings[3](age),
-      ].filter(Boolean).join(" "),
-    () =>
-      [
-        `${name} was born ${bornClause}${birthYear ? ` (about ${birthYear})` : ""}.`,
-        factLine,
-        eraLine,
-        familyLine,
-        (deathYear || deathPlace) && closings[0](age),
-      ].filter(Boolean).join(" "),
-  ];
-
-  const idx = hashString(person?.id) % templates.length;
-  return templates[idx]();
+  const facts = buildNarrativeContext(person, context?.events || [], context);
+  const known = facts.knownFacts;
+  const lines = [];
+  if (known.birthDate || known.birthPlace) {
+    lines.push(
+      `${name} was born${known.birthDate ? ` on ${known.birthDate}` : ""}${known.birthPlace ? ` in ${known.birthPlace}` : ""}.`,
+    );
+  } else if (facts.birthYear) {
+    lines.push(`${name} was born around ${facts.birthYear}.`);
+  }
+  const birthCtx = formatEventLine(facts.contextAtBirth);
+  if (birthCtx && birthCtx !== "No specific context recorded.") lines.push(`At the time of birth: ${birthCtx}.`);
+  if (known.marriages.length) lines.push(`Marriage records: ${known.marriages.join("; ")}.`);
+  if (known.childrenCount) {
+    lines.push(
+      `Children: ${known.childrenCount}${known.childrenNames.length ? ` (${known.childrenNames.join(", ")})` : ""}.`,
+    );
+  }
+  if (known.occupation) lines.push(`Recorded occupation: ${known.occupation}.`);
+  if (known.deathDate || known.deathPlace) {
+    lines.push(
+      `${name} passed away${known.deathDate ? ` ${known.deathDate}` : ""}${known.deathPlace ? ` in ${known.deathPlace}` : ""}.`,
+    );
+  }
+  return lines.join(" ");
 }
 
 async function checkOllamaConnectivity({ baseUrl, model }) {
@@ -237,32 +340,46 @@ export async function getNarrative(person, context, options) {
   }
 
   const name = cleanName(String(person?.name?.full || "")).replace(/\s+/g, " ").trim();
-  const first = firstWord(cleanName(person?.name?.given)) || firstWord(name);
-  const birthDate = person?.birth?.date || "";
-  const birthPlace = person?.birth?.place || "";
-  const deathDate = person?.death?.date || "";
-  const deathPlace = person?.death?.place || "";
-  const events = (context?.events || []).slice(0, 2).map((e) => e.event).filter(Boolean);
+  const facts = buildNarrativeContext(person, context?.events || [], context);
+  const known = facts.knownFacts;
+  const prompt = `
+You are writing a brief biography for a printed family history book. Write ONLY from the facts provided. Do not invent any personal details, preferences, hobbies, or personality traits.
+If a fact is not listed below, do not include it.
 
-  const prompt = [
-    "Write a warm, engaging 2-3 paragraph biography for a family history book about",
-    `${name || "this person"}, born ${birthDate || "unknown date"} in ${birthPlace || "unknown place"}, died ${deathDate || "unknown date"} in ${deathPlace || "unknown place"}.`,
-    `Historical context of their era: ${events.length ? events.join("; ") : "N/A"}.`,
-    "Write for a general audience including children. Use present tense for historical description.",
-    "Be curious and humanizing, not clinical. Do not invent facts not provided.",
-    "STRICT RULES:",
-    "- Do NOT invent hobbies, interests, or preferences.",
-    "- Do NOT mention specific music, books, or cultural preferences unless in the provided data.",
-    "- Do NOT invent personality traits.",
-    "- DO focus on: their historical era, their location, their family structure (from provided data), and what daily life would have realistically looked like for someone of their time and place.",
-    "- If data is sparse, describe their era and place vividly rather than inventing personal details.",
-    "- Write as a thoughtful historian, not a fiction writer.",
-    "- Maximum 150 words.",
-    "Do not use the word 'undoubtedly'.",
-    first ? `Start by using their first name: ${first}.` : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+PERSON:
+  Name: ${name || "Unknown"}
+  Born: ${known.birthDate || "Unknown"}${known.birthPlace ? ` in ${known.birthPlace}` : ""}
+  Died: ${known.deathDate || "Unknown"}${known.deathPlace ? ` in ${known.deathPlace}` : ""}
+  ${known.ageAtDeath ? `Age at death: ${known.ageAtDeath}` : ""}
+  Sex: ${known.sex || "Unknown"}
+  ${known.occupation ? `Occupation: ${known.occupation}` : ""}
+
+FAMILY:
+  ${known.marriages.length ? `Married: ${known.marriages.join("; ")}` : "No marriage records found"}
+  ${known.childrenCount ? `Children: ${known.childrenCount}${known.childrenNames.length ? ` (${known.childrenNames.join(", ")})` : ""}` : "Children: none recorded"}
+
+RECORDED LIFE EVENTS:
+  ${formatRecordedEvents(known.otherEvents)}
+  ${known.residences.length ? `Lived in: ${formatResidences(known.residences)}` : ""}
+
+HISTORICAL CONTEXT (what was happening in their world):
+  At birth (${facts.stages?.birth ?? "unknown"}): ${formatEventLine(facts.contextAtBirth)}
+  In childhood (~${facts.stages?.childhood ?? "unknown"}): ${formatEventLine(facts.contextAtChildhood)}
+  In early adulthood (~${facts.stages?.comingOfAge ?? "unknown"}): ${formatEventLine(facts.contextAtAdulthood)}
+
+WRITE:
+  Paragraph 1 (2-3 sentences): Birth, origin, the world they were born into.
+  Paragraph 2 (2-3 sentences): What shaped their coming-of-age years, grounded in the context above.
+  Paragraph 3 (2-4 sentences): Adult life using ONLY family and life-event facts above.
+  Final sentence: obituary-style close.
+
+RULES:
+  - Never invent hobbies, interests, or personality.
+  - Never use phrases like "known for", "loved by all", "had a passion for", "enjoyed", "was fond of" unless sourced from data.
+  - Maximum 200 words total.
+  - Write in past tense, warm but factual tone.
+  - If data is sparse, write shorter and do not pad with fiction.
+`.trim();
 
   try {
     console.log(`Generating narrative for: ${personNameForLog} (via Ollama)`);
