@@ -32,6 +32,25 @@ const PAGE_HEIGHT_DXA = 15840;
 const MARGIN_DXA = 1440;
 const CONTENT_WIDTH_DXA = 9360;
 
+function parseArgs(argv) {
+  const args = {
+    surname: null,
+    surnames: null,
+    generation: null,
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--surname") args.surname = argv[++i] || null;
+    else if (a === "--surnames") args.surnames = argv[++i] || null;
+    else if (a === "--generation") {
+      const n = Number(argv[++i]);
+      args.generation = Number.isFinite(n) ? n : null;
+    }
+  }
+  return args;
+}
+
 function yearFromISO(dateISO) {
   if (!dateISO || typeof dateISO !== "string") return null;
   const m = dateISO.match(/^(\d{4})-/);
@@ -85,6 +104,10 @@ function normalizeSurname(value) {
     .replace(/[^A-Z0-9' -]/g, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function slugifySurname(value) {
+  return normalizeSurname(value).toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9'-]/g, "");
 }
 
 function decadeLabel(year) {
@@ -565,14 +588,163 @@ function topItemsWithExamples(items, limit) {
     .map(([key, count]) => ({ key, count, example: example.get(key) || "" }));
 }
 
+function filterDatasetBySurnameAndGeneration({ individuals, families, surnameSet, generationNumber }) {
+  const personByIdAll = new Map(individuals.filter((p) => p?.id).map((p) => [p.id, p]));
+  const familiesByIdAll = new Map(families.filter((f) => f?.id).map((f) => [f.id, f]));
+
+  const hasSurnameFilter = surnameSet && surnameSet.size > 0;
+
+  // Step 1: pick "matched" individuals by surname (case-insensitive normalized).
+  const matchedIndividuals = hasSurnameFilter
+    ? individuals.filter((p) => surnameSet.has(normalizeSurname(p?.name?.surname)))
+    : individuals.slice();
+
+  // Step 2: keep families where husband OR wife is a matched individual.
+  const matchedIds = new Set(matchedIndividuals.map((p) => p?.id).filter(Boolean));
+  const keptFamilyIds = new Set();
+  const keepPersonIds = new Set();
+
+  if (!hasSurnameFilter) {
+    for (const p of individuals) if (p?.id) keepPersonIds.add(p.id);
+    for (const f of families) if (f?.id) keptFamilyIds.add(f.id);
+  } else {
+    for (const f of families) {
+      if (!f?.id) continue;
+      if (f?.husband && matchedIds.has(f.husband)) keptFamilyIds.add(f.id);
+      else if (f?.wife && matchedIds.has(f.wife)) keptFamilyIds.add(f.id);
+    }
+
+    // Step 3: for each kept family, keep both spouses and all children.
+    for (const fid of keptFamilyIds) {
+      const fam = familiesByIdAll.get(fid);
+      if (!fam) continue;
+      for (const pid of [fam.husband, fam.wife].filter(Boolean)) keepPersonIds.add(pid);
+      for (const cid of Array.isArray(fam?.children) ? fam.children : []) keepPersonIds.add(cid);
+    }
+  }
+
+  // Step 4: apply generation filter (after surname expansion, so spouse/children are available),
+  // then re-expand families to preserve marriage/children context within the generation.
+  let filteredIndividuals = Array.from(keepPersonIds).map((id) => personByIdAll.get(id)).filter(Boolean);
+  let filteredFamilies = Array.from(keptFamilyIds).map((id) => familiesByIdAll.get(id)).filter(Boolean);
+
+  if (generationNumber && Number.isFinite(generationNumber)) {
+    const gen = buildGenerationStats({ individuals: filteredIndividuals, families: filteredFamilies });
+    const idsInGen = new Set(
+      Array.from(gen.childrenByParent.keys())
+        .concat(filteredIndividuals.map((p) => p?.id))
+        .filter(Boolean)
+        .filter((id) => (gen && gen.rows) || true),
+    );
+    // We need the exact generation map, not only rows; rebuild with internal helper.
+    const { generation: genMap } = (() => {
+      const personById = new Map(filteredIndividuals.filter((p) => p?.id).map((p) => [p.id, p]));
+      const childrenByParent = new Map();
+      for (const fam of filteredFamilies) {
+        const children = Array.isArray(fam?.children) ? fam.children : [];
+        const parents = [fam?.husband, fam?.wife].filter(Boolean);
+        for (const parentId of parents) {
+          if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, new Set());
+          const set = childrenByParent.get(parentId);
+          for (const childId of children) set.add(childId);
+        }
+      }
+      const roots = filteredIndividuals
+        .filter((p) => p?.id)
+        .filter((p) => !Array.isArray(p.familiesAsChild) || p.familiesAsChild.length === 0)
+        .map((p) => p.id);
+      const generation = new Map();
+      const queue = [];
+      for (const r of roots) {
+        generation.set(r, 1);
+        queue.push(r);
+      }
+      while (queue.length > 0) {
+        const current = queue.shift();
+        const g = generation.get(current);
+        const kids = childrenByParent.get(current);
+        if (!kids) continue;
+        for (const childId of kids) {
+          if (!personById.has(childId)) continue;
+          const nextG = g + 1;
+          if (!generation.has(childId) || nextG < generation.get(childId)) {
+            generation.set(childId, nextG);
+            queue.push(childId);
+          }
+        }
+      }
+      return { generation };
+    })();
+
+    const genKeepIds = new Set(filteredIndividuals.filter((p) => genMap.get(p.id) === generationNumber).map((p) => p.id));
+
+    const keptFamiliesForGen = new Set();
+    const expandedPeopleForGen = new Set();
+    for (const f of filteredFamilies) {
+      if (!f?.id) continue;
+      const spouseHit = (f?.husband && genKeepIds.has(f.husband)) || (f?.wife && genKeepIds.has(f.wife));
+      if (!spouseHit) continue;
+      keptFamiliesForGen.add(f.id);
+      for (const pid of [f.husband, f.wife].filter(Boolean)) expandedPeopleForGen.add(pid);
+      for (const cid of Array.isArray(f?.children) ? f.children : []) expandedPeopleForGen.add(cid);
+    }
+
+    filteredIndividuals = Array.from(expandedPeopleForGen).map((id) => personByIdAll.get(id)).filter(Boolean);
+    filteredFamilies = Array.from(keptFamiliesForGen).map((id) => familiesByIdAll.get(id)).filter(Boolean);
+  }
+
+  return { individuals: filteredIndividuals, families: filteredFamilies, matchedIndividualsCount: matchedIndividuals.length };
+}
+
 async function generate() {
+  const args = parseArgs(process.argv.slice(2));
   const jsonPath = getLatestConvertedJsonPath();
   const data = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
-  const individuals = Array.isArray(data.individuals) ? data.individuals : [];
-  const families = Array.isArray(data.families) ? data.families : [];
+  const allIndividuals = Array.isArray(data.individuals) ? data.individuals : [];
+  const allFamilies = Array.isArray(data.families) ? data.families : [];
+
+  const surnameSet = (() => {
+    if (args.surnames) {
+      const parts = String(args.surnames)
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return new Set(parts.map(normalizeSurname));
+    }
+    if (args.surname) return new Set([normalizeSurname(args.surname)]);
+    return new Set();
+  })();
+
+  const hasSurnameFilter = surnameSet.size > 0;
+  const generationFilter = Number.isFinite(args.generation) ? args.generation : null;
+
+  const filtered = filterDatasetBySurnameAndGeneration({
+    individuals: allIndividuals,
+    families: allFamilies,
+    surnameSet: hasSurnameFilter ? surnameSet : null,
+    generationNumber: generationFilter,
+  });
+
+  const individuals = filtered.individuals;
+  const families = filtered.families;
 
   const personById = new Map(individuals.filter((p) => p?.id).map((p) => [p.id, p]));
   const familiesById = new Map(families.filter((f) => f?.id).map((f) => [f.id, f]));
+
+  const filterSummary = (() => {
+    if (!hasSurnameFilter && !generationFilter) return null;
+    const surnameList = Array.from(surnameSet).filter(Boolean).map((s) => s.toLowerCase());
+    const parts = [];
+    if (surnameList.length) parts.push(`surnames=[${surnameList.join(", ")}]`);
+    if (generationFilter) parts.push(`generation=${generationFilter}`);
+    return parts.join(" | ");
+  })();
+
+  if (filterSummary) {
+    console.log(
+      `Filter: ${filterSummary} | Matched ${filtered.matchedIndividualsCount.toLocaleString()} of ${allIndividuals.length.toLocaleString()} individuals`,
+    );
+  }
 
   const surnameForTitle = mostCommonSurname(individuals);
   const generatedDate = format(new Date(), "MMMM d, yyyy");
@@ -610,19 +782,53 @@ async function generate() {
   const maxDecadeBirths = decades.reduce((m, d) => Math.max(m, d.births), 0) || 1;
 
   // Surnames top 25 with min/max year
-  const surnameStats = new Map();
-  for (const p of individuals) {
-    const s = p?.name?.surname;
-    if (!s) continue;
-    const y = yearFromISO(p?.birth?.dateISO);
-    if (!surnameStats.has(s)) surnameStats.set(s, { count: 0, min: null, max: null });
-    const st = surnameStats.get(s);
-    st.count++;
-    if (y !== null) {
-      st.min = st.min === null ? y : Math.min(st.min, y);
-      st.max = st.max === null ? y : Math.max(st.max, y);
+  const buildSurnameStats = (people) => {
+    const surnameStats = new Map();
+    for (const p of people) {
+      const s = p?.name?.surname;
+      if (!s) continue;
+      const y = yearFromISO(p?.birth?.dateISO);
+      if (!surnameStats.has(s)) surnameStats.set(s, { count: 0, min: null, max: null });
+      const st = surnameStats.get(s);
+      st.count++;
+      if (y !== null) {
+        st.min = st.min === null ? y : Math.min(st.min, y);
+        st.max = st.max === null ? y : Math.max(st.max, y);
+      }
     }
-  }
+    return surnameStats;
+  };
+
+  const surnameStats = (() => {
+    // When surname filter is active, show surnames the filtered set married into (spouse surnames),
+    // not only the filtered surname itself.
+    if (!hasSurnameFilter) return buildSurnameStats(individuals);
+    const stats = new Map();
+    for (const f of families) {
+      const h = f?.husband ? personById.get(f.husband) : null;
+      const w = f?.wife ? personById.get(f.wife) : null;
+      const hs = normalizeSurname(h?.name?.surname);
+      const ws = normalizeSurname(w?.name?.surname);
+      const husbandMatches = hs && surnameSet.has(hs);
+      const wifeMatches = ws && surnameSet.has(ws);
+      if (!husbandMatches && !wifeMatches) continue;
+
+      const other = husbandMatches ? w : wifeMatches ? h : null;
+      if (!other) continue;
+      const otherSurname = other?.name?.surname;
+      if (!otherSurname) continue;
+      const y = yearFromISO(other?.birth?.dateISO);
+      if (!stats.has(otherSurname)) stats.set(otherSurname, { count: 0, min: null, max: null });
+      const st = stats.get(otherSurname);
+      st.count++;
+      if (y !== null) {
+        st.min = st.min === null ? y : Math.min(st.min, y);
+        st.max = st.max === null ? y : Math.max(st.max, y);
+      }
+    }
+    return stats.size ? stats : buildSurnameStats(individuals);
+  })();
+
   const topSurnames = Array.from(surnameStats.entries())
     .sort((a, b) => b[1].count - a[1].count)
     .slice(0, 25)
@@ -748,14 +954,56 @@ async function generate() {
     .sort((a, b) => b[1] - a[1])
     .map(([s]) => s);
 
-  const orderedSurnames = [
-    ...primaryOrder,
-    ...qualifying.filter((s) => !primaryOrder.includes(s)),
-  ];
+  const orderedSurnames = (() => {
+    if (hasSurnameFilter) {
+      const ordered = args.surnames
+        ? String(args.surnames).split(",").map((s) => s.trim()).filter(Boolean)
+        : args.surname
+          ? [String(args.surname)]
+          : [];
+      const normalized = ordered.map(normalizeSurname).filter(Boolean);
+      // Keep only surnames that exist in the filtered data.
+      return normalized.filter((s) => surnameCounts.has(s));
+    }
+    return [...primaryOrder, ...qualifying.filter((s) => !primaryOrder.includes(s))];
+  })();
 
   const outDir = path.join(projectRoot, "reports");
   fs.mkdirSync(outDir, { recursive: true });
-  const outPath = path.join(outDir, `family-tree-report-${dateStr}.docx`);
+  const filterSlugParts = [];
+  if (hasSurnameFilter) {
+    const ordered = args.surnames
+      ? String(args.surnames)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : args.surname
+        ? [String(args.surname)]
+        : [];
+    for (const s of ordered) filterSlugParts.push(slugifySurname(s));
+  }
+  if (generationFilter) filterSlugParts.push(`gen${generationFilter}`);
+  const filterSlug = filterSlugParts.length ? `-${filterSlugParts.join("-")}` : "";
+  const outPath = path.join(outDir, `family-tree-report${filterSlug}-${dateStr}.docx`);
+
+  const titleText = (() => {
+    const cap = (s) => String(s || "").slice(0, 1).toUpperCase() + String(s || "").slice(1).toLowerCase();
+    if (hasSurnameFilter) {
+      const ordered = args.surnames
+        ? String(args.surnames).split(",").map((s) => s.trim()).filter(Boolean)
+        : args.surname
+          ? [String(args.surname)]
+          : [];
+      const names = ordered.map(cap).filter(Boolean);
+      const base =
+        names.length === 1
+          ? `The ${names[0]} Family — Genealogical Report`
+          : `The ${names.slice(0, 2).join(" & ")} Families — Genealogical Report`;
+      return generationFilter ? `${base.replace(" — Genealogical Report", "")} — Generation ${generationFilter}` : base;
+    }
+    if (generationFilter) return `${surnameForTitle} Family Tree — Generation ${generationFilter}`;
+    return `${surnameForTitle} Family Tree — Full Report`;
+  })();
 
   const doc = new Document({
     styles: {
@@ -781,7 +1029,7 @@ async function generate() {
             alignment: AlignmentType.CENTER,
             spacing: { before: 3000, after: 300 },
             children: [
-              new TextRun({ text: `${surnameForTitle} Family Tree`, font: "Arial", size: 56, bold: true }),
+              new TextRun({ text: titleText, font: "Arial", size: 56, bold: true }),
             ],
           }),
           new Paragraph({
@@ -819,6 +1067,7 @@ async function generate() {
             headerFill: "D5E8F0",
             headerTextColor: "000000",
             rows: [
+              ...(filterSummary ? [["Filter Applied", filterSummary]] : []),
               ["Total Individuals", individuals.length.toLocaleString()],
               ["Total Families", families.length.toLocaleString()],
               ["Living (protected)", livingCount.toLocaleString()],

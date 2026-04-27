@@ -18,6 +18,10 @@
     "patch-errors": "node scripts/patch-errors.js",
     "fs-match": "node scripts/fs-match.js",
     "report": "node scripts/generate-report.js",
+    "report:filter": "node scripts/generate-report.js",
+    "report:note": "node -e \"console.log('NOTE: Replace report:mikesell/report:sulc with surnames from your own tree before publishing or sharing scripts.')\"",
+    "report:mikesell": "node scripts/generate-report.js --surname mikesell",
+    "report:sulc": "node scripts/generate-report.js --surname sulc",
     "book": "node scripts/generate-book.js",
     "validate": "node scripts/validate.js",
     "stats": "node scripts/stats.js"
