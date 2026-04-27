@@ -4,7 +4,8 @@ npm-debug.log
 yarn.lock
 
 # Environment
-.env # Never commit secrets (FamilySearch OAuth client id/secret, tokens, etc.)
+# Never commit secrets (FamilySearch OAuth client id/secret, tokens, etc.)
+.env
 .env.local
 
 # macOS / OS junk
