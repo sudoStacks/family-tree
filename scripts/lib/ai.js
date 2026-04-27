@@ -250,8 +250,15 @@ export async function getNarrative(person, context, options) {
     `Historical context of their era: ${events.length ? events.join("; ") : "N/A"}.`,
     "Write for a general audience including children. Use present tense for historical description.",
     "Be curious and humanizing, not clinical. Do not invent facts not provided.",
-    "If data is sparse, focus on what their daily life might have looked like given their time and place.",
-    "Keep it under 200 words. Do not use the word 'undoubtedly'.",
+    "STRICT RULES:",
+    "- Do NOT invent hobbies, interests, or preferences.",
+    "- Do NOT mention specific music, books, or cultural preferences unless in the provided data.",
+    "- Do NOT invent personality traits.",
+    "- DO focus on: their historical era, their location, their family structure (from provided data), and what daily life would have realistically looked like for someone of their time and place.",
+    "- If data is sparse, describe their era and place vividly rather than inventing personal details.",
+    "- Write as a thoughtful historian, not a fiction writer.",
+    "- Maximum 150 words.",
+    "Do not use the word 'undoubtedly'.",
     first ? `Start by using their first name: ${first}.` : "",
   ]
     .filter(Boolean)

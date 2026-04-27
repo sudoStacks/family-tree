@@ -15,6 +15,7 @@ import {
   ShadingType,
   Table,
   TableCell,
+  TableLayoutType,
   TableOfContents,
   TableRow,
   TextRun,
@@ -274,6 +275,7 @@ function makeTable({
   });
 
   return new Table({
+    layout: { type: TableLayoutType.FIXED },
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: tableRows,
   });
@@ -494,6 +496,7 @@ function makeCoverageTable(rows) {
   });
 
   return new Table({
+    layout: { type: TableLayoutType.FIXED },
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [headerRow, ...bodyRows],
   });

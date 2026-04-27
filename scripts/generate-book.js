@@ -21,6 +21,7 @@ import {
   Table,
   TableCell,
   TableOfContents,
+  TableLayoutType,
   TableRow,
   TextRun,
   WidthType,
@@ -57,6 +58,7 @@ function parseArgs(argv) {
     noImages: false,
     noAi: false,
     noPlaces: false,
+    clearCache: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -67,6 +69,7 @@ function parseArgs(argv) {
     else if (a === "--no-images") args.noImages = true;
     else if (a === "--no-ai") args.noAi = true;
     else if (a === "--no-places") args.noPlaces = true;
+    else if (a === "--clear-cache") args.clearCache = true;
   }
   return args;
 }
@@ -252,6 +255,7 @@ function table2Col(rows) {
     });
   });
   return new Table({
+    layout: { type: TableLayoutType.FIXED },
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [header, ...bodyRows],
   });
@@ -449,17 +453,25 @@ async function findLocalPortrait(person) {
   return files[0] || null;
 }
 
-async function imageRunFromFile(imagePath) {
+async function imageRunFromFile(imagePath, extHint = null) {
   const input = fs.readFileSync(imagePath);
-  const resized = await sharp(input).resize({ width: 800, withoutEnlargement: true }).toBuffer();
+  const extFromPath = String(extHint || path.extname(imagePath || "")).replace(".", "").toLowerCase();
+  const normalizedType = extFromPath === "jpeg" ? "jpg" : extFromPath;
+  const imageType = ["jpg", "png", "gif", "webp", "bmp"].includes(normalizedType) ? normalizedType : "jpg";
+  const resized = await sharp(input)
+    .resize({ width: 800, withoutEnlargement: true })
+    .toFormat(imageType === "jpg" ? "jpeg" : imageType)
+    .toBuffer();
   return new ImageRun({
     data: resized,
     transformation: { width: 400, height: 300 },
+    type: imageType,
   });
 }
 
 function placeholderBox(text) {
   return new Table({
+    layout: { type: TableLayoutType.FIXED },
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [
       new TableRow({
@@ -650,6 +662,9 @@ function buildGenerationPlaceIndex({ people, familiesById, personById }) {
 
 async function generateBook() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.clearCache) {
+    fs.rmSync(path.join(projectRoot, "data", "narrative-cache"), { recursive: true, force: true });
+  }
 
   const jsonPath = getLatestConvertedJsonPath();
   const data = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
@@ -990,7 +1005,7 @@ async function generateBook() {
 
         if (placeImage?.cachePath) {
           try {
-            const run = await imageRunFromFile(placeImage.cachePath);
+            const run = await imageRunFromFile(placeImage.cachePath, placeImage.ext);
             wikimediaImages++;
             children.push(
               new Paragraph({ alignment: AlignmentType.CENTER, children: [run], spacing: { after: 80 } }),
@@ -1055,6 +1070,7 @@ async function generateBook() {
         children.push(
           heading(`Family Members from This Region`, 2),
           new Table({
+            layout: { type: TableLayoutType.FIXED },
             width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
             rows: [
               new TableRow({
@@ -1175,7 +1191,7 @@ async function generateBook() {
             try {
               const img = await getCachedOrFetchCommonsImage(query);
               if (img.cachePath) {
-                imageRun = await imageRunFromFile(img.cachePath);
+                imageRun = await imageRunFromFile(img.cachePath, img.ext);
                 wikimediaImages++;
                 caption = `Historic view: ${query}`;
                 if (img.metadata) imageCredits.push(img.metadata);
@@ -1242,6 +1258,7 @@ async function generateBook() {
       );
 
       const spread = new Table({
+        layout: { type: TableLayoutType.FIXED },
         width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
         rows: [
             new TableRow({
@@ -1353,7 +1370,7 @@ async function generateBook() {
 
             if (placeImage?.cachePath) {
               try {
-                const run = await imageRunFromFile(placeImage.cachePath);
+                const run = await imageRunFromFile(placeImage.cachePath, placeImage.ext);
                 wikimediaImages++;
                 children.push(
                   new Paragraph({ alignment: AlignmentType.CENTER, children: [run], spacing: { after: 80 } }),
@@ -1424,6 +1441,7 @@ async function generateBook() {
       children.push(
         heading("Generation Roster (limited details)", 2),
         new Table({
+          layout: { type: TableLayoutType.FIXED },
           width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
           rows: [
             new TableRow({

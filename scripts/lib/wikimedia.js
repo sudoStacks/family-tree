@@ -9,6 +9,10 @@ const projectRoot = path.join(__dirname, "../..");
 
 const WIKIMEDIA_USER_AGENT =
   "family-tree-book-generator/1.0 (github.com/sudostacks/family-tree; genealogy research tool)";
+const IMAGE_CACHE_DIR = path.join(projectRoot, "data", "image-cache");
+const ALLOWED_EXTS = new Set(["jpg", "png", "gif", "webp", "bmp"]);
+let cleanedUndefinedCache = false;
+let loggedCacheNote = false;
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -25,16 +29,122 @@ function sanitizeFilename(value) {
 
 export function imageCachePath(query) {
   const name = sanitizeFilename(query) || "image";
-  return path.join(projectRoot, "data", "image-cache", `${name}.jpg`);
+  return path.join(IMAGE_CACHE_DIR, name);
 }
 
-export async function getCachedOrFetchCommonsImage(query) {
-  const cachePath = imageCachePath(query);
-  if (fs.existsSync(cachePath)) return { cachePath, metadata: null, source: "cache" };
+function detectExtension({ contentType, imageUrl }) {
+  const ct = String(contentType || "").toLowerCase();
+  let ext = "jpg";
+  if (ct.includes("image/jpeg")) ext = "jpg";
+  else if (ct.includes("image/png")) ext = "png";
+  else if (ct.includes("image/gif")) ext = "gif";
+  else if (ct.includes("image/webp")) ext = "webp";
+  else if (ct.includes("image/bmp")) ext = "bmp";
 
-  ensureDir(path.join(projectRoot, "data", "image-cache"));
-  ensureDir(path.dirname(cachePath));
+  const urlExt = String(imageUrl || "")
+    .split("?")[0]
+    .split(".")
+    .pop()
+    .toLowerCase();
+  if (ALLOWED_EXTS.has(urlExt) || urlExt === "jpeg") {
+    ext = urlExt === "jpeg" ? "jpg" : urlExt;
+  }
+  return ext;
+}
 
+function cachePathForExt(basePath, ext) {
+  return `${basePath}.${ext}`;
+}
+
+function findExistingCachedPath(basePath) {
+  for (const ext of ALLOWED_EXTS) {
+    const p = cachePathForExt(basePath, ext);
+    if (fs.existsSync(p)) return { cachePath: p, ext, mimeType: `image/${ext === "jpg" ? "jpeg" : ext}` };
+  }
+  return null;
+}
+
+function cleanupUndefinedCacheFiles() {
+  if (cleanedUndefinedCache) return;
+  cleanedUndefinedCache = true;
+  ensureDir(IMAGE_CACHE_DIR);
+  const files = fs.readdirSync(IMAGE_CACHE_DIR);
+  for (const file of files) {
+    if (file.endsWith(".undefined")) {
+      try {
+        fs.unlinkSync(path.join(IMAGE_CACHE_DIR, file));
+      } catch {
+        // ignore cleanup failures
+      }
+    }
+  }
+}
+
+function buildFallbackQueries(query) {
+  const q = String(query || "").trim();
+  const out = [q];
+  const parts = q
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const state = parts.length >= 2 ? parts[parts.length - 2] : "";
+  const county = parts.length >= 3 ? parts[parts.length - 3] : "";
+  if (county && state) out.push(`${county} County, ${state}`);
+  if (state) out.push(`${state} historical photograph`);
+  return out.slice(0, 3);
+}
+
+function scoreCandidate(c, query) {
+  const title = String(c?.title || "").toLowerCase();
+  const desc = String(c?.desc || "").toLowerCase();
+  const q = String(query || "").toLowerCase();
+  const rejectKeywords = [
+    "map",
+    "logo",
+    "icon",
+    "flag",
+    "coat of arms",
+    "seal",
+    "diagram",
+    "chart",
+    "symbol",
+    "emblem",
+    "locator",
+    "outline",
+    "blank",
+    "svg",
+  ];
+  const preferredKeywords = [
+    "photo",
+    "photograph",
+    "view",
+    "street",
+    "building",
+    "church",
+    "courthouse",
+    "farm",
+    "house",
+    "historic",
+    "old",
+    "vintage",
+    "portrait",
+    "family",
+    "downtown",
+    "main street",
+  ];
+
+  const hasReject = rejectKeywords.some((k) => title.includes(k));
+  const hasPreferred = preferredKeywords.some((k) => title.includes(k));
+  let score = 0;
+  if (c.width > c.height) score += 3;
+  if (c.width >= 800) score += 2;
+  if (hasPreferred) score += 2;
+  if (hasReject) score -= 3;
+  if (q && (desc.includes(q) || title.includes(q))) score += 1;
+  return score;
+}
+
+async function searchCommons(query) {
   const url =
     "https://commons.wikimedia.org/w/api.php" +
     "?action=query" +
@@ -58,7 +168,7 @@ export async function getCachedOrFetchCommonsImage(query) {
     });
   } catch (error) {
     console.log("Wikimedia error:", query, "-", error?.message || String(error));
-    return { cachePath: null, metadata: null, source: "error" };
+    return [];
   }
 
   const pages = res?.data?.query?.pages ? Object.values(res.data.query.pages) : [];
@@ -74,43 +184,96 @@ export async function getCachedOrFetchCommonsImage(query) {
       const title = String(p?.title || "");
       const desc = String(info?.extmetadata?.ImageDescription?.value || "");
       const isSvg = title.toLowerCase().endsWith(".svg");
-      const licenseOk = /public domain|cc/i.test(ext);
-      const landscape = width > height;
-      const historicHint = /historic|old/i.test(title + " " + desc);
       return {
         title,
+        desc,
         thumb,
         width,
         height,
         license: ext || null,
         attribution: info?.extmetadata?.Attribution?.value || info?.extmetadata?.Artist?.value || null,
         licenseUrl: info?.extmetadata?.LicenseUrl?.value || null,
-        score: (licenseOk ? 3 : 0) + (landscape ? 2 : 0) + (historicHint ? 1 : 0),
         isSvg,
       };
     })
     .filter(Boolean)
-    .filter((c) => c.thumb && !c.isSvg)
+    .filter((c) => c.thumb && !c.isSvg && c.width >= 400)
+    .map((c) => ({ ...c, score: scoreCandidate(c, query) }))
     .sort((a, b) => b.score - a.score);
 
   console.log("Wikimedia results:", candidates.length, "images");
+  return candidates;
+}
 
-  const best = candidates[0] || null;
-  if (!best) return { cachePath: null, metadata: null, source: "none" };
+async function downloadImageWithMetadata(imageUrl) {
+  const response = await axios.get(imageUrl, {
+    responseType: "arraybuffer",
+    timeout: 10_000,
+    headers: {
+      "User-Agent": WIKIMEDIA_USER_AGENT,
+      Accept: "application/json",
+    },
+  });
+  const contentType = response?.headers?.["content-type"] || "";
+  const ext = detectExtension({ contentType, imageUrl });
+  return {
+    buffer: Buffer.from(response.data),
+    ext,
+    mimeType: String(contentType || `image/${ext === "jpg" ? "jpeg" : ext}`),
+  };
+}
+
+export async function getCachedOrFetchCommonsImage(query) {
+  cleanupUndefinedCacheFiles();
+  if (!loggedCacheNote) {
+    loggedCacheNote = true;
+    console.log("Note: delete data/image-cache/ if images appear broken - cached files may have wrong extensions");
+  }
+
+  const basePath = imageCachePath(query);
+  const existing = findExistingCachedPath(basePath);
+  if (existing) {
+    return { cachePath: existing.cachePath, metadata: null, source: "cache", ext: existing.ext, mimeType: existing.mimeType };
+  }
+
+  ensureDir(IMAGE_CACHE_DIR);
+  ensureDir(path.dirname(basePath));
+
+  const attempts = buildFallbackQueries(query);
+  let selected = null;
+  let selectedQuery = query;
+  for (let index = 0; index < attempts.length; index++) {
+    const attemptQuery = attempts[index];
+    const candidates = await searchCommons(attemptQuery);
+    if (index > 0) {
+      console.log(`Wikimedia fallback (${index + 1}/3): ${attemptQuery} → ${candidates.length} images`);
+    }
+    const best = candidates[0] || null;
+    if (best && best.score >= 0) {
+      selected = best;
+      selectedQuery = attemptQuery;
+      break;
+    }
+  }
+
+  if (!selected) return { cachePath: null, metadata: null, source: "none", ext: null, mimeType: null };
+
+  console.log(`Wikimedia selected: ${selected.title} (score: ${selected.score})`);
 
   try {
-    const img = await axios.get(best.thumb, {
-      responseType: "arraybuffer",
-      timeout: 10_000,
-      headers: {
-        "User-Agent": WIKIMEDIA_USER_AGENT,
-        Accept: "application/json",
-      },
-    });
-    fs.writeFileSync(cachePath, Buffer.from(img.data));
+    const downloaded = await downloadImageWithMetadata(selected.thumb);
+    const finalCachePath = cachePathForExt(basePath, downloaded.ext);
+    fs.writeFileSync(finalCachePath, downloaded.buffer);
+    return {
+      cachePath: finalCachePath,
+      metadata: selected,
+      source: selectedQuery === query ? "wikimedia" : "wikimedia-fallback",
+      ext: downloaded.ext,
+      mimeType: downloaded.mimeType,
+      buffer: downloaded.buffer,
+    };
   } catch (error) {
     console.log("Wikimedia error:", query, "-", error?.message || String(error));
-    return { cachePath: null, metadata: best, source: "download-error" };
+    return { cachePath: null, metadata: selected, source: "download-error", ext: null, mimeType: null };
   }
-  return { cachePath, metadata: best, source: "wikimedia" };
 }

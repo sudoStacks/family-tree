@@ -143,6 +143,8 @@ export async function getPlaceImage(placeName, decade) {
     attribution: result?.metadata?.attribution || null,
     title: result?.metadata?.title || null,
     source: result?.source || "wikimedia",
+    ext: result?.ext || null,
+    mimeType: result?.mimeType || null,
   };
 }
 
