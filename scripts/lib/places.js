@@ -130,15 +130,15 @@ export async function getPlaceSummary(placeName, decade) {
  * Wikimedia Commons place image helper (uses existing caching in wikimedia.js).
  * Returns a local cachePath plus attribution metadata when available.
  */
-export async function getPlaceImage(placeName, decade) {
+export async function getPlaceImage(placeName, birthYear = null) {
   const name = String(placeName || "").trim();
   if (!name) return null;
-  const query = decade ? `${name} ${decade} historic` : `${name} historic`;
-  const result = await getCachedOrFetchCommonsImage(query);
+  const yearQuery = birthYear && Number.isFinite(birthYear) ? `${name} ${birthYear}` : `${name} historic`;
+  const result = await getCachedOrFetchCommonsImage(yearQuery, { birthYear });
   if (!result?.cachePath) return null;
   return {
     cachePath: result.cachePath,
-    caption: decade ? `${name}, circa ${decade}` : `${name}`,
+    caption: birthYear && Number.isFinite(birthYear) ? `${name}, circa ${birthYear}` : `${name}`,
     license: result?.metadata?.license || null,
     attribution: result?.metadata?.attribution || null,
     title: result?.metadata?.title || null,

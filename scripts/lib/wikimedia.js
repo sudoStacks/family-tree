@@ -94,57 +94,118 @@ function buildFallbackQueries(query) {
   return out.slice(0, 3);
 }
 
-function scoreCandidate(c, query) {
-  const title = String(c?.title || "").toLowerCase();
-  const desc = String(c?.desc || "").toLowerCase();
-  const q = String(query || "").toLowerCase();
-  const rejectKeywords = [
-    "map",
-    "logo",
-    "icon",
-    "flag",
-    "coat of arms",
-    "seal",
-    "diagram",
-    "chart",
-    "symbol",
-    "emblem",
-    "locator",
-    "outline",
-    "blank",
-    "svg",
-  ];
-  const preferredKeywords = [
-    "photo",
-    "photograph",
-    "view",
-    "street",
-    "building",
-    "church",
-    "courthouse",
-    "farm",
-    "house",
-    "historic",
-    "old",
-    "vintage",
-    "portrait",
-    "family",
-    "downtown",
-    "main street",
-  ];
-
-  const hasReject = rejectKeywords.some((k) => title.includes(k));
-  const hasPreferred = preferredKeywords.some((k) => title.includes(k));
-  let score = 0;
-  if (c.width > c.height) score += 3;
-  if (c.width >= 800) score += 2;
-  if (hasPreferred) score += 2;
-  if (hasReject) score -= 3;
-  if (q && (desc.includes(q) || title.includes(q))) score += 1;
-  return score;
+function extractYear(text) {
+  const matches = String(text || "").match(/\b(1[6-9]\d{2}|20\d{2})\b/g);
+  if (!matches || matches.length === 0) return null;
+  return Number(matches[0]);
 }
 
-async function searchCommons(query) {
+function storyDecision({ candidate, query, birthYear }) {
+  const title = String(candidate?.title || "");
+  const titleLower = title.toLowerCase();
+  const desc = String(candidate?.desc || "");
+  const descLower = desc.toLowerCase();
+  const source = String(candidate?.source || "").toLowerCase();
+  const artist = String(candidate?.artist || "").toLowerCase();
+  const url = String(candidate?.thumb || "").toLowerCase();
+  const queryLower = String(query || "").toLowerCase();
+
+  const skip = (reason) => ({ keep: false, score: -999, reason });
+
+  // HARD REJECTS
+  const titleNoPrefix = title.replace(/^file:/i, "").trim();
+  if (/^[A-Z]{1,3}[\s.]?\d/.test(titleNoPrefix)) return skip("book spine/call number");
+  if (titleLower.includes("copy 1") || titleLower.includes("copy 2")) return skip("library copy label");
+  if (titleLower.includes("blank page") || titleLower.includes("empty") || titleLower.includes("back cover")) {
+    return skip("blank/cover scan");
+  }
+  if (candidate.width < 100 || candidate.height < 100) return skip("too small/icon-sized");
+  if (url.endsWith(".svg") || titleLower.endsWith(".svg")) return skip("svg");
+
+  const archiveSource = /uc-nrlf|hathitrust|internet archive/.test(`${source} ${artist}`);
+  const looksLikeBookTitle = /volume|vol\.|novel|poems|catalog|transactions|proceedings|copy|book/i.test(titleNoPrefix);
+  if (archiveSource && looksLikeBookTitle) return skip("book cover scan source");
+
+  let score = 0;
+
+  // Place photos and contextual architecture/infrastructure
+  const placeStoryKeywords = [
+    "courthouse",
+    "court house",
+    "main street",
+    "downtown",
+    "aerial view",
+    "bird's eye",
+    "street view",
+    "historic district",
+    "old town",
+    "church",
+    "farm",
+    "farmhouse",
+    "barn",
+    "bridge",
+    "railroad",
+    "depot",
+    "station",
+    "school",
+    "cemetery",
+    "graveyard",
+    "hotel",
+    "mill",
+    "factory",
+    "store",
+  ];
+  for (const k of placeStoryKeywords) {
+    if (titleLower.includes(k) || descLower.includes(k)) score += 4;
+  }
+
+  // Historical photo hints
+  const historicalHints = ["photograph", "photo", "portrait", "circa", "ca.", "c.", "18", "19"];
+  for (const k of historicalHints) {
+    if (titleLower.includes(k) || descLower.includes(k)) score += 3;
+  }
+
+  // Maps: keep positively unless clearly modern
+  const mapHints = ["map", "atlas", "plat", "survey", "county map"];
+  const modernMapHints = ["openstreetmap", "google", "satellite", "gps"];
+  const isMap = mapHints.some((k) => titleLower.includes(k) || descLower.includes(k));
+  const isModernMap = modernMapHints.some((k) => titleLower.includes(k) || descLower.includes(k));
+  if (isMap && isModernMap) return skip("modern map");
+  if (isMap) score += 2;
+
+  // Seal / coat of arms: keep only if place-specific
+  const civicIdentity = ["seal", "coat of arms", "emblem"];
+  const hasCivicIdentity = civicIdentity.some((k) => titleLower.includes(k) || descLower.includes(k));
+  if (hasCivicIdentity) {
+    if (queryLower && (titleLower.includes(queryLower) || descLower.includes(queryLower))) score += 1;
+    else return skip("generic heraldry");
+  }
+
+  // Newspapers / documents: keep if dated
+  const docHints = ["newspaper", "front page", "gazette", "herald", "deed", "certificate", "record"];
+  const isDocument = docHints.some((k) => titleLower.includes(k) || descLower.includes(k));
+  if (isDocument) {
+    const y = extractYear(`${title} ${desc}`);
+    if (y !== null) score += 2;
+  }
+
+  // Bonuses / penalties
+  if (candidate.width > candidate.height) score += 3;
+  if (candidate.width >= 800) score += 2;
+  if (queryLower && (titleLower.includes(queryLower) || descLower.includes(queryLower))) score += 2;
+  if (birthYear && Number.isFinite(birthYear)) {
+    const eventYear = extractYear(`${title} ${desc}`);
+    if (eventYear !== null && Math.abs(eventYear - birthYear) <= 50) score += 1;
+  }
+  const isPortraitPhoto = titleLower.includes("portrait") || descLower.includes("portrait");
+  if (candidate.height > candidate.width && !isPortraitPhoto) score -= 2;
+  if (candidate.width < 300) score -= 1;
+
+  if (score <= 0) return skip("score<=0");
+  return { keep: true, score, reason: "story-relevant" };
+}
+
+async function searchCommons(query, { birthYear = null, placeName = null } = {}) {
   const url =
     "https://commons.wikimedia.org/w/api.php" +
     "?action=query" +
@@ -183,10 +244,14 @@ async function searchCommons(query) {
       const ext = String(info?.extmetadata?.LicenseShortName?.value || "");
       const title = String(p?.title || "");
       const desc = String(info?.extmetadata?.ImageDescription?.value || "");
+      const source = String(info?.extmetadata?.Source?.value || "");
+      const artist = String(info?.extmetadata?.Artist?.value || "");
       const isSvg = title.toLowerCase().endsWith(".svg");
       return {
         title,
         desc,
+        source,
+        artist,
         thumb,
         width,
         height,
@@ -197,12 +262,27 @@ async function searchCommons(query) {
       };
     })
     .filter(Boolean)
-    .filter((c) => c.thumb && !c.isSvg && c.width >= 400)
-    .map((c) => ({ ...c, score: scoreCandidate(c, query) }))
-    .sort((a, b) => b.score - a.score);
+    .filter((c) => c.thumb && !c.isSvg);
 
-  console.log("Wikimedia results:", candidates.length, "images");
-  return candidates;
+  const kept = [];
+  for (const candidate of candidates) {
+    const decision = storyDecision({
+      candidate,
+      query: placeName || query,
+      birthYear,
+    });
+    if (decision.keep) {
+      const withScore = { ...candidate, score: decision.score };
+      kept.push(withScore);
+      console.log(`[KEEP score=${decision.score}] ${candidate.title}`);
+    } else {
+      console.log(`[SKIP ${decision.reason}] ${candidate.title}`);
+    }
+  }
+
+  kept.sort((a, b) => b.score - a.score);
+  console.log("Wikimedia results:", kept.length, "images");
+  return kept;
 }
 
 async function downloadImageWithMetadata(imageUrl) {
@@ -223,7 +303,7 @@ async function downloadImageWithMetadata(imageUrl) {
   };
 }
 
-export async function getCachedOrFetchCommonsImage(query) {
+export async function getCachedOrFetchCommonsImage(query, options = {}) {
   cleanupUndefinedCacheFiles();
   if (!loggedCacheNote) {
     loggedCacheNote = true;
@@ -244,7 +324,10 @@ export async function getCachedOrFetchCommonsImage(query) {
   let selectedQuery = query;
   for (let index = 0; index < attempts.length; index++) {
     const attemptQuery = attempts[index];
-    const candidates = await searchCommons(attemptQuery);
+    const candidates = await searchCommons(attemptQuery, {
+      birthYear: options?.birthYear ?? null,
+      placeName: query,
+    });
     if (index > 0) {
       console.log(`Wikimedia fallback (${index + 1}/3): ${attemptQuery} → ${candidates.length} images`);
     }

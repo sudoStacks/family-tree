@@ -977,7 +977,8 @@ async function generateBook() {
         let summary = null;
         if (!args.noImages) {
           try {
-            placeImage = await getPlaceImage(regionName, decade);
+            const regionBirthYear = earliest !== null ? earliest : null;
+            placeImage = await getPlaceImage(regionName, regionBirthYear);
           } catch {
             placeImage = null;
           }
@@ -1189,7 +1190,9 @@ async function generateBook() {
           const query = person?.birth?.place || person?.marriage?.place || "";
           if (query) {
             try {
-              const img = await getCachedOrFetchCommonsImage(query);
+              const img = await getCachedOrFetchCommonsImage(query, {
+                birthYear: yearFromISO(person?.birth?.dateISO),
+              });
               if (img.cachePath) {
                 imageRun = await imageRunFromFile(img.cachePath, img.ext);
                 wikimediaImages++;
@@ -1332,7 +1335,8 @@ async function generateBook() {
             let placeImage = null;
             if (!args.noImages) {
               try {
-                placeImage = await getPlaceImage(placeName, decade);
+                const placeBirthYear = stat.years.length ? Math.min(...stat.years) : null;
+                placeImage = await getPlaceImage(placeName, placeBirthYear);
               } catch {
                 placeImage = null;
               }
