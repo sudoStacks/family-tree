@@ -161,11 +161,12 @@ function buildFooter() {
   });
 }
 
-function buildHeaderRow(cells, { fill, textColor }) {
+function buildHeaderRow(cells, { fill, textColor, columnWidths }) {
   return new TableRow({
     children: cells.map(
-      (text) =>
+      (text, idx) =>
         new TableCell({
+          width: columnWidths?.[idx] ? { size: columnWidths[idx], type: WidthType.DXA } : undefined,
           shading: { type: ShadingType.CLEAR, fill, color: "auto" },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [
@@ -203,9 +204,20 @@ function makeTable({
   headerTextColor = "FFFFFF",
   rowFillFn = shadedRowFill,
 }) {
+  const inferredWidths = (() => {
+    if (Array.isArray(columnWidths) && columnWidths.length) return columnWidths;
+    const cols = header?.length || rows?.[0]?.length || 0;
+    if (!cols) return [];
+    const w = Math.floor(CONTENT_WIDTH_DXA / cols);
+    const out = Array.from({ length: cols }, () => w);
+    // Adjust last column to ensure exact sum of 9360.
+    out[out.length - 1] += CONTENT_WIDTH_DXA - out.reduce((a, b) => a + b, 0);
+    return out;
+  })();
+
   const tableRows = [];
   if (header) {
-    tableRows.push(buildHeaderRow(header, { fill: headerFill, textColor: headerTextColor }));
+    tableRows.push(buildHeaderRow(header, { fill: headerFill, textColor: headerTextColor, columnWidths: inferredWidths }));
   }
 
   rows.forEach((row, idx) => {
@@ -215,8 +227,8 @@ function makeTable({
         children: row.map((value, cellIdx) => {
           const cell = toCell(value);
           return new TableCell({
-            width: columnWidths?.[cellIdx]
-              ? { size: columnWidths[cellIdx], type: WidthType.DXA }
+            width: inferredWidths?.[cellIdx]
+              ? { size: inferredWidths[cellIdx], type: WidthType.DXA }
               : undefined,
             shading: { type: ShadingType.CLEAR, fill },
             margins: { top: 80, bottom: 80, left: 120, right: 120 },
@@ -432,9 +444,11 @@ function coverageRowShading(coveragePct) {
 }
 
 function makeCoverageTable(rows) {
+  const columnWidths = [2340, 2340, 2340, 2340];
   const headerRow = buildHeaderRow(["Field", "Populated", "Missing", "Coverage"], {
     fill: "1F3864",
     textColor: "FFFFFF",
+    columnWidths,
   });
 
   const bodyRows = rows.map((r) => {
@@ -447,6 +461,7 @@ function makeCoverageTable(rows) {
     ].map(
       (text) =>
         new TableCell({
+          width: { size: 2340, type: WidthType.DXA },
           shading: { type: ShadingType.CLEAR, fill },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [new Paragraph({ children: [new TextRun({ text, font: "Arial", size: 22 })] })],

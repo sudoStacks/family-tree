@@ -213,6 +213,7 @@ function table2Col(rows) {
     children: ["", ""].map(
       () =>
         new TableCell({
+          width: { size: 4680, type: WidthType.DXA },
           shading: { type: ShadingType.CLEAR, fill: "1F3864" },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [new Paragraph({ children: [new TextRun({ text: "", color: "FFFFFF" })] })],
@@ -420,7 +421,8 @@ function placeholderBox(text) {
       new TableRow({
         children: [
           new TableCell({
-            margins: { top: 240, bottom: 240, left: 240, right: 240 },
+            width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
+            margins: { top: 80, bottom: 80, left: 120, right: 120 },
             borders: {
               top: { style: BorderStyle.SINGLE, size: 8, color: "2E75B6" },
               bottom: { style: BorderStyle.SINGLE, size: 8, color: "2E75B6" },
@@ -950,6 +952,7 @@ async function generateBook() {
                 children: ["Name", "Born", "Died", "Notes"].map(
                   (t) =>
                     new TableCell({
+                      width: { size: 2340, type: WidthType.DXA },
                       shading: { type: ShadingType.CLEAR, fill: "1F3864" },
                       margins: { top: 80, bottom: 80, left: 120, right: 120 },
                       children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, color: "FFFFFF" })] })],
@@ -962,6 +965,7 @@ async function generateBook() {
                     children: r.map(
                       (t) =>
                         new TableCell({
+                          width: { size: 2340, type: WidthType.DXA },
                           shading: { type: ShadingType.CLEAR, fill: idx % 2 === 0 ? "FFFFFF" : "F2F2F2" },
                           margins: { top: 80, bottom: 80, left: 120, right: 120 },
                           children: [new Paragraph({ children: [new TextRun({ text: String(t), font: "Arial", size: 22 })] })],
@@ -1124,21 +1128,21 @@ async function generateBook() {
       const spread = new Table({
         width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
         rows: [
-          new TableRow({
-            children: [
-              new TableCell({
-                width: { size: 4600, type: WidthType.DXA },
-                margins: { top: 120, bottom: 120, left: 120, right: 120 },
-                children: leftChildren,
-              }),
-              new TableCell({
-                width: { size: 4760, type: WidthType.DXA },
-                margins: { top: 120, bottom: 120, left: 120, right: 120 },
-                children: rightChildren,
-              }),
-            ],
-          }),
-        ],
+            new TableRow({
+              children: [
+                new TableCell({
+                  width: { size: 4600, type: WidthType.DXA },
+                  margins: { top: 80, bottom: 80, left: 120, right: 120 },
+                  children: leftChildren,
+                }),
+                new TableCell({
+                  width: { size: 4760, type: WidthType.DXA },
+                  margins: { top: 80, bottom: 80, left: 120, right: 120 },
+                  children: rightChildren,
+                }),
+              ],
+            }),
+          ],
       });
 
       children.push(spread);
@@ -1307,6 +1311,7 @@ async function generateBook() {
               children: ["Name", "Born", "Died"].map(
                 (t) =>
                   new TableCell({
+                    width: { size: 3120, type: WidthType.DXA },
                     shading: { type: ShadingType.CLEAR, fill: "1F3864" },
                     margins: { top: 80, bottom: 80, left: 120, right: 120 },
                     children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, color: "FFFFFF" })] })],
@@ -1319,6 +1324,7 @@ async function generateBook() {
                   children: r.map(
                     (t) =>
                       new TableCell({
+                        width: { size: 3120, type: WidthType.DXA },
                         shading: { type: ShadingType.CLEAR, fill: idx % 2 === 0 ? "FFFFFF" : "F2F2F2" },
                         margins: { top: 80, bottom: 80, left: 120, right: 120 },
                         children: [new Paragraph({ children: [new TextRun({ text: String(t), font: "Arial", size: 22 })] })],
