@@ -29,6 +29,11 @@ data/verification-report-*.json
 data/manual-review.json
 data/patch-log.json
 
+# Book generator caches (generated locally)
+data/image-cache/
+data/narrative-cache/
+data/place-cache/
+
 # Logs
 data/json/warnings-*.log
 *.log
@@ -36,6 +41,9 @@ data/json/warnings-*.log
 # Document system: per-person metadata and any unassigned files are private.
 documents/by-person/
 documents/unassigned/
+
+# Generated reports (local output only)
+reports/
 
 # IDE
 .vscode/

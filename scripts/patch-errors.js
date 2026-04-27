@@ -6,6 +6,15 @@ import { fileURLToPath } from 'url';
 
 import { getLatestConvertedJsonPath } from './_json-latest.js';
 
+/**
+ * NOTE: This script contains dataset-specific person IDs (@P3607@, @P3256@) and is
+ * intentionally not generic.
+ *
+ * Users of this repo should replace these IDs with the error IDs surfaced by their
+ * own `npm run verify` output. See `data/verification-report-*.json` for your
+ * specific errors.
+ */
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
 
