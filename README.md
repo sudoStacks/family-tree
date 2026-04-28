@@ -67,6 +67,29 @@ npm run verify
 
 Writes a dated report to `data/verification-report-YYYY-MM-DD.json`.
 
+### 8. Build multi-source historical context (optional, long-running)
+
+```bash
+npm run fetch-sources
+npm run build-context
+```
+
+This pipeline first fetches period+place facts from external sources (DPLA, Europeana, Chronicling America, LOC, OWID, and optional World History Encyclopedia), then uses Ollama only to synthesize those facts into narrative-ready context under `data/historical-context/`.
+Typical runtime is **20-60 minutes** for a full tree range, which is expected.
+See `docs/setup-context-sources.md` for API key setup and run order.
+
+Useful scoped builds:
+
+```bash
+npm run context:status
+npm run build-context:world
+npm run build-context:usa
+npm run build-context:ohio
+npm run build-context:indiana
+npm run enrich-context
+npm run build-context:reset
+```
+
 ## 📁 Folder Structure
 
 ```
@@ -241,6 +264,10 @@ A: GEDCOM supports many date formats. If a date doesn't convert to ISO 8601, it'
 **Q: How do I merge multiple GEDCOM files?**
 
 A: Not yet automated, but you can merge the `individuals`, `families`, and other arrays in the JSON files manually. Check `integrations.md` for upcoming merge tools.
+
+**Q: Why does context generation take so long?**
+
+A: `fetch-sources` + `build-context` process many 5-year windows across multiple scopes and enforce API/model rate limits. A full run commonly takes 20-60 minutes. Run `npm run update-context` quarterly for incremental refresh.
 
 ## 📝 License
 

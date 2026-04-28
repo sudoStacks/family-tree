@@ -1,0 +1,69 @@
+{
+  "sources": [
+    {
+      "id": "world_history_encyclopedia",
+      "name": "World History Encyclopedia",
+      "url": "https://api.worldhistory.org",
+      "apiKey": "WHE_API_KEY",
+      "rateLimit": 1000,
+      "coverage": "global",
+      "bestFor": ["ancient", "medieval", "early_modern"],
+      "enabled": true
+    },
+    {
+      "id": "dpla",
+      "name": "Digital Public Library of America",
+      "url": "https://api.dp.la/v2",
+      "apiKey": "DPLA_API_KEY",
+      "rateLimit": 500,
+      "coverage": "USA",
+      "bestFor": ["photos", "documents", "newspapers"],
+      "enabled": true
+    },
+    {
+      "id": "chronicling_america",
+      "name": "Chronicling America (Library of Congress)",
+      "url": "https://chroniclingamerica.loc.gov",
+      "apiKey": null,
+      "rateLimit": 200,
+      "coverage": "USA",
+      "bestFor": ["newspapers", "local_context"],
+      "enabled": true
+    },
+    {
+      "id": "europeana",
+      "name": "Europeana",
+      "url": "https://api.europeana.eu/record/v2",
+      "apiKey": "EUROPEANA_API_KEY",
+      "rateLimit": 1000,
+      "coverage": "Europe",
+      "bestFor": ["photos", "documents", "social_history"],
+      "enabled": true
+    },
+    {
+      "id": "our_world_in_data",
+      "name": "Our World In Data",
+      "url": "https://ourworldindata.org",
+      "apiKey": null,
+      "rateLimit": 60,
+      "coverage": "global",
+      "bestFor": ["statistics", "conditions", "quality_of_life"],
+      "enabled": true
+    },
+    {
+      "id": "loc_collections",
+      "name": "Library of Congress Collections",
+      "url": "https://www.loc.gov/search",
+      "apiKey": null,
+      "rateLimit": 200,
+      "coverage": "USA",
+      "bestFor": ["primary_sources", "photos"],
+      "enabled": true
+    }
+  ],
+  "scopes": {
+    "world": ["global"],
+    "country": ["USA", "Germany", "Ireland", "Czech", "UK"],
+    "region": ["Ohio", "Indiana", "Pennsylvania", "Virginia", "Illinois"]
+  }
+}
