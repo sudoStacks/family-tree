@@ -184,6 +184,11 @@ function storyDecision({ candidate, query, birthYear }) {
 
   // HARD REJECTS
   const titleNoPrefix = title.replace(/^file:/i, "").trim();
+  const pageNumberPattern = /\(page \d+\)/i;
+  const dplaScanPattern = /DPLA\s*-\s*[a-f0-9]{20,}/i;
+  const iaPattern = /\(IA\s+[a-zA-Z0-9]+\)/i;
+  const bookWordPattern = /sketch of|history of|historical sketch|annual report|proceedings of|volume i|volume ii|volume iii|vol\.|illustrated atlas|biographical sketch/i;
+
   if (/^[A-Z]{1,3}[\s.]?\d/.test(titleNoPrefix)) return skip("book spine/call number");
   if (titleLower.includes("copy 1") || titleLower.includes("copy 2")) return skip("library copy label");
   if (titleLower.includes("blank page") || titleLower.includes("empty") || titleLower.includes("back cover")) {
@@ -196,6 +201,12 @@ function storyDecision({ candidate, query, birthYear }) {
     return skip("tiff");
   }
   if (String(candidate?.mimeType || "").toLowerCase().includes("application/pdf")) return skip("pdf mime");
+  if (pageNumberPattern.test(titleNoPrefix)) return skip("scanned page image");
+  if (dplaScanPattern.test(titleNoPrefix)) return skip("dpla scan id");
+  if (iaPattern.test(titleNoPrefix)) return skip("internet archive scan id");
+  if (bookWordPattern.test(titleNoPrefix) && (pageNumberPattern.test(titleNoPrefix) || dplaScanPattern.test(titleNoPrefix))) {
+    return skip("book/document page");
+  }
 
   const archiveSource = /uc-nrlf|hathitrust|internet archive/.test(`${source} ${artist}`);
   const looksLikeBookTitle = /volume|vol\.|novel|poems|catalog|transactions|proceedings|copy|book/i.test(titleNoPrefix);
@@ -234,7 +245,7 @@ function storyDecision({ candidate, query, birthYear }) {
     "store",
   ];
   for (const k of placeStoryKeywords) {
-    if (titleLower.includes(k) || descLower.includes(k)) score += 4;
+    if (titleLower.includes(k) || descLower.includes(k)) score += 8;
   }
 
   // Historical photo hints
@@ -242,6 +253,9 @@ function storyDecision({ candidate, query, birthYear }) {
   for (const k of historicalHints) {
     if (titleLower.includes(k) || descLower.includes(k)) score += 3;
   }
+  const hasYearHint = /\b(1[6-9]\d{2}|20\d{2})\b/.test(titleNoPrefix);
+  if (hasYearHint && !pageNumberPattern.test(titleNoPrefix)) score += 6;
+  if (/portrait|photograph of|photo of|group photo|family photo|class photo/i.test(titleNoPrefix)) score += 5;
 
   // Maps: keep positively unless clearly modern
   const mapHints = ["map", "atlas", "plat", "survey", "county map"];
@@ -279,6 +293,7 @@ function storyDecision({ candidate, query, birthYear }) {
   if (queryKeywords.length) {
     const titleMatchCount = queryKeywords.filter((k) => titleLower.includes(k.toLowerCase())).length;
     if (titleMatchCount > 0) score += 3;
+    if (titleNoPrefix.length < 60 && titleMatchCount > 0) score += 3;
   }
   if (/\b[A-Z][a-z]+ [A-Z][a-z]+\b/.test(titleNoPrefix) && !/(county|city|town|street|school|courthouse|church|depot|railroad)/i.test(titleNoPrefix)) {
     score -= 2;
@@ -290,6 +305,9 @@ function storyDecision({ candidate, query, birthYear }) {
   const isPortraitPhoto = titleLower.includes("portrait") || descLower.includes("portrait");
   if (candidate.height > candidate.width && !isPortraitPhoto) score -= 2;
   if (candidate.width < 300) score -= 1;
+  if (pageNumberPattern.test(titleNoPrefix)) score -= 10;
+  if (dplaScanPattern.test(titleNoPrefix)) score -= 8;
+  if (titleNoPrefix.length > 100) score -= 5;
 
   if (score <= 0) return skip("score<=0");
   return { keep: true, score, reason: "story-relevant" };

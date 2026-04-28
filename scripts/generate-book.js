@@ -209,14 +209,30 @@ function heading(text, level) {
 
 function body(text) {
   return new Paragraph({
+    style: "Normal",
     children: [
       new TextRun({
         text: String(text ?? ""),
-        font: "Arial",
+        font: "Georgia",
         size: 22,
+        color: "1a1a1a",
       }),
     ],
-    spacing: { after: 120 },
+    spacing: { after: 160, line: 276 },
+  });
+}
+
+function sectionLabel(text) {
+  return new Paragraph({
+    spacing: { before: 200, after: 80 },
+    children: [new TextRun({ text: String(text || ""), font: "Arial", size: 20, bold: true, color: "1F3864" })],
+  });
+}
+
+function captionText(text) {
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    children: [new TextRun({ text: String(text || ""), font: "Arial", size: 18, italics: true, color: "666666" })],
   });
 }
 
@@ -242,9 +258,9 @@ function shadedBlock({ text, fill, borderColor }) {
 function table2Col(rows) {
   const header = new TableRow({
     children: ["", ""].map(
-      () =>
+      (_, idx) =>
         new TableCell({
-          width: { size: 4680, type: WidthType.DXA },
+          width: { size: idx === 0 ? 3744 : 5616, type: WidthType.DXA },
           shading: { type: ShadingType.CLEAR, fill: "1F3864" },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [new Paragraph({ children: [new TextRun({ text: "", color: "FFFFFF" })] })],
@@ -256,13 +272,13 @@ function table2Col(rows) {
     return new TableRow({
       children: [
         new TableCell({
-          width: { size: 4680, type: WidthType.DXA },
+          width: { size: 3744, type: WidthType.DXA },
           shading: { type: ShadingType.CLEAR, fill },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [new Paragraph({ children: [new TextRun({ text: r[0], font: "Arial", size: 22, bold: true })] })],
         }),
         new TableCell({
-          width: { size: 4680, type: WidthType.DXA },
+          width: { size: 5616, type: WidthType.DXA },
           shading: { type: ShadingType.CLEAR, fill },
           margins: { top: 80, bottom: 80, left: 120, right: 120 },
           children: [new Paragraph({ children: [new TextRun({ text: r[1], font: "Arial", size: 22 })] })],
@@ -271,7 +287,7 @@ function table2Col(rows) {
     });
   });
   return new Table({
-    columnWidths: [4680, 4680],
+    columnWidths: [3744, 5616],
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [header, ...bodyRows],
   });
@@ -384,6 +400,39 @@ async function imageRunFromFile(imagePath, extHint = null) {
     transformation: { width: 400, height: 300 },
     type: imageType,
   });
+}
+
+function imageTypeFromPath(imagePath, extHint = null) {
+  const extFromPath = String(extHint || path.extname(imagePath || "")).replace(".", "").toLowerCase();
+  const normalizedType = extFromPath === "jpeg" ? "jpg" : extFromPath;
+  return ["jpg", "png", "gif", "webp", "bmp"].includes(normalizedType) ? normalizedType : "jpg";
+}
+
+async function buildImageParagraph(imagePath, extHint = null) {
+  try {
+    const buffer = await fs.promises.readFile(imagePath);
+    const meta = await sharp(buffer).metadata();
+    const maxWidth = 3000;
+    const maxHeight = 2500;
+    let width = meta.width || 200;
+    let height = meta.height || 150;
+    const scale = Math.min(maxWidth / width, maxHeight / height, 1);
+    width = Math.round(width * scale * 9525);
+    height = Math.round(height * scale * 9525);
+    return new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [
+        new ImageRun({
+          data: buffer,
+          transformation: { width, height },
+          type: imageTypeFromPath(imagePath, extHint),
+        }),
+      ],
+    });
+  } catch (e) {
+    console.log("Image embed failed:", e?.message || String(e));
+    return null;
+  }
 }
 
 function placeholderBox(text) {
@@ -845,6 +894,34 @@ async function generateBook() {
         alignment: AlignmentType.CENTER,
         children: [new TextRun({ text: `${minYear || "?"} — ${maxYear || "?"}`, font: "Arial", size: 24, color: "666666" })],
       }),
+    );
+
+    if (!args.noImages) {
+      let coverImageParagraph = null;
+      const localCover = await findLocalPortrait(anchor);
+      if (localCover) {
+        coverImageParagraph = await buildImageParagraph(localCover);
+      } else if (anchor?.birth?.place) {
+        const coverImg = await getCachedOrFetchCommonsImage(anchor.birth.place, { birthYear: yearFromISO(anchor?.birth?.dateISO) });
+        if (coverImg?.buffer) {
+          const cachePath = path.join(projectRoot, "data", "image-cache", `${String(anchor.id || "anchor").replace(/[^A-Za-z0-9_-]/g, "_")}.${coverImg.ext || "jpg"}`);
+          fs.writeFileSync(cachePath, coverImg.buffer);
+          coverImageParagraph = await buildImageParagraph(cachePath, coverImg.ext);
+        }
+      }
+      if (coverImageParagraph) {
+        children.push(coverImageParagraph);
+      } else {
+        children.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [new TextRun({ text: "[No historical image available for this location]", italics: true, color: "999999", size: 18, font: "Arial" })],
+          }),
+        );
+      }
+    }
+
+    children.push(
       new Paragraph({ pageBreakBefore: true }),
     );
 
@@ -860,9 +937,24 @@ async function generateBook() {
         const relation = relationshipSubtitle({ person, personById, familiesById });
         const lifeStageContext = await getLifeStageContext(person);
         const { text: narrative } = await getNarrative(person, { lifeStageContext, familiesById, personById }, { refresh: args.refresh, noAi: args.noAi });
+        let imgParagraph = null;
+        let imgCaption = null;
+        if (!args.noImages) {
+          const q = person?.birth?.place || "";
+          if (q) {
+            const result = await getCachedOrFetchCommonsImage(q, { birthYear: yearFromISO(person?.birth?.dateISO) });
+            if (result?.buffer) {
+              const cachePath = path.join(projectRoot, "data", "image-cache", `${String(person.id || "person").replace(/[^A-Za-z0-9_-]/g, "_")}.${result.ext || "jpg"}`);
+              fs.writeFileSync(cachePath, result.buffer);
+              imgParagraph = await buildImageParagraph(cachePath, result.ext);
+              if (imgParagraph) imgCaption = captionText(`${result.title || "Image"} — ${result.license || "unknown"}`);
+            }
+          }
+        }
         children.push(
           heading(displayName(person), 2),
           ...(relation ? [body(relation)] : []),
+          ...(imgParagraph ? [imgParagraph, imgCaption] : [new Paragraph({ children: [new TextRun({ text: "[No historical image available for this location]", italics: true, color: "999999", size: 18, font: "Arial" })] })]),
           body(narrative),
           divider(),
         );
@@ -913,20 +1005,20 @@ async function generateBook() {
       children.push(
         heading("Life Timeline", 2),
         new Table({
-          columnWidths: [3120, 3120, 3120],
+          columnWidths: [1200, 1200, 6960],
           width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
           rows: [
             new TableRow({
               children: ["Year", "Age", "Event"].map((t) => new TableCell({
-                width: { size: 3120, type: WidthType.DXA },
+                width: { size: t === "Event" ? 6960 : 1200, type: WidthType.DXA },
                 shading: { type: ShadingType.CLEAR, fill: "1F3864" },
                 margins: { top: 80, bottom: 80, left: 120, right: 120 },
                 children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, color: "FFFFFF" })] })],
               })),
             }),
             ...timelineRows.map((r, idx) => new TableRow({
-              children: r.map((t) => new TableCell({
-                width: { size: 3120, type: WidthType.DXA },
+              children: r.map((t, i) => new TableCell({
+                width: { size: i === 2 ? 6960 : 1200, type: WidthType.DXA },
                 shading: { type: ShadingType.CLEAR, fill: idx % 2 === 0 ? "FFFFFF" : "F2F2F2" },
                 margins: { top: 80, bottom: 80, left: 120, right: 120 },
                 children: [new Paragraph({ children: [new TextRun({ text: String(t), font: "Arial", size: 22 })] })],
@@ -952,7 +1044,27 @@ async function generateBook() {
         const relation = relationshipSubtitle({ person, personById, familiesById });
         const lifeStageContext = await getLifeStageContext(person);
         const { text: narrative } = await getNarrative(person, { lifeStageContext, familiesById, personById }, { refresh: args.refresh, noAi: args.noAi });
-        children.push(heading(displayName(person), 2), ...(relation ? [body(relation)] : []), body(narrative), divider());
+        let imgParagraph = null;
+        let imgCaption = null;
+        if (!args.noImages) {
+          const q = person?.birth?.place || "";
+          if (q) {
+            const result = await getCachedOrFetchCommonsImage(q, { birthYear: yearFromISO(person?.birth?.dateISO) });
+            if (result?.buffer) {
+              const cachePath = path.join(projectRoot, "data", "image-cache", `${String(person.id || "person").replace(/[^A-Za-z0-9_-]/g, "_")}.${result.ext || "jpg"}`);
+              fs.writeFileSync(cachePath, result.buffer);
+              imgParagraph = await buildImageParagraph(cachePath, result.ext);
+              if (imgParagraph) imgCaption = captionText(`${result.title || "Image"} — ${result.license || "unknown"}`);
+            }
+          }
+        }
+        children.push(
+          heading(displayName(person), 2),
+          ...(relation ? [body(relation)] : []),
+          ...(imgParagraph ? [imgParagraph, imgCaption] : [new Paragraph({ children: [new TextRun({ text: "[No historical image available for this location]", italics: true, color: "999999", size: 18, font: "Arial" })] })]),
+          body(narrative),
+          divider(),
+        );
       }
       if (livingLevel.length) {
         children.push(
@@ -1592,35 +1704,30 @@ async function generateBook() {
       if (imageRun) {
         leftChildren.push(
           new Paragraph({ alignment: AlignmentType.CENTER, children: [imageRun], spacing: { after: 80 } }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [new TextRun({ text: caption || "", font: "Arial", size: 18, italics: true, color: "666666" })],
-          }),
+          captionText(caption || ""),
         );
       } else {
-        const initials = firstName(person).slice(0, 1).toUpperCase() || "?";
-        leftChildren.push(placeholderBox(`${initials} — ${person?.birth?.place ? person.birth.place : "No image found"}`));
+        leftChildren.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [new TextRun({ text: "[No historical image available for this location]", italics: true, color: "999999", size: 18, font: "Arial" })],
+          }),
+        );
       }
 
       const rightChildren = [];
       rightChildren.push(
-        new Paragraph({
-          children: [new TextRun({ text: `About ${firstName(person)}`, font: "Arial", size: 28, bold: true, color: "1F3864" })],
-        }),
-        new Paragraph({ children: [new TextRun({ text: narrative, font: "Arial", size: 22 })] }),
+        sectionLabel(`About ${firstName(person)}`),
+        body(narrative),
         divider(),
-        new Paragraph({
-          children: [new TextRun({ text: "Life & Times", font: "Arial", size: 26, bold: true, color: "2E75B6" })],
-        }),
+        sectionLabel("Life & Times"),
       );
       const bullets = lifeTimesEvents.slice(0, 5);
       rightChildren.push(...bulletList(bullets.length ? bullets : ["No era facts available yet."], numberingRef));
 
       rightChildren.push(
         divider(),
-        new Paragraph({
-          children: [new TextRun({ text: "Family connections", font: "Arial", size: 26, bold: true, color: "2E75B6" })],
-        }),
+        sectionLabel("Family connections"),
         personConnectionsBox({ person, personById, familiesById }),
         new Paragraph({
           children: [
@@ -1758,7 +1865,7 @@ async function generateBook() {
                   new Paragraph({ alignment: AlignmentType.CENTER, children: [run], spacing: { after: 80 } }),
                   new Paragraph({
                     alignment: AlignmentType.CENTER,
-                    children: [new TextRun({ text: placeImage.caption || placeName, font: "Arial", size: 18, italics: true, color: "666666" })],
+            children: [new TextRun({ text: placeImage.caption || placeName, font: "Arial", size: 18, italics: true, color: "666666" })],
                   }),
                 );
               } catch {
