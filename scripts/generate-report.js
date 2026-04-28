@@ -15,7 +15,6 @@ import {
   ShadingType,
   Table,
   TableCell,
-  TableLayoutType,
   TableOfContents,
   TableRow,
   TextRun,
@@ -250,10 +249,9 @@ function makeTable({
       new TableRow({
         children: row.map((value, cellIdx) => {
           const cell = toCell(value);
+          const cellWidth = inferredWidths[cellIdx] || Math.floor(CONTENT_WIDTH_DXA / Math.max(1, row.length));
           return new TableCell({
-            width: inferredWidths?.[cellIdx]
-              ? { size: inferredWidths[cellIdx], type: WidthType.DXA }
-              : undefined,
+            width: { size: cellWidth, type: WidthType.DXA },
             shading: { type: ShadingType.CLEAR, fill },
             margins: { top: 80, bottom: 80, left: 120, right: 120 },
             children: [
@@ -275,7 +273,7 @@ function makeTable({
   });
 
   return new Table({
-    layout: { type: TableLayoutType.FIXED },
+    columnWidths: inferredWidths,
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: tableRows,
   });
@@ -496,7 +494,7 @@ function makeCoverageTable(rows) {
   });
 
   return new Table({
-    layout: { type: TableLayoutType.FIXED },
+    columnWidths,
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [headerRow, ...bodyRows],
   });

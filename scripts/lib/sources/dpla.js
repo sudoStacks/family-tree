@@ -21,6 +21,22 @@ function buildQuery(scope) {
   return clean;
 }
 
+function buildQueriesForScope(scope) {
+  const clean = String(scope || "").trim();
+  if (isGlobalScope(clean)) {
+    return ["history"];
+  }
+  if (isCountryScope(clean)) {
+    if (clean === "USA") return ["United States"];
+    return [clean];
+  }
+  // Region/state scope inside USA:
+  // 1) state/region name
+  // 2) state/region + photograph
+  // 3) broad USA fallback
+  return [clean, `${clean} photograph`, "United States"];
+}
+
 function toArray(value) {
   if (Array.isArray(value)) return value;
   if (value === null || value === undefined) return [];
@@ -64,7 +80,7 @@ function normalizeDplaItem(doc, startYear) {
   );
   if (!text) return null;
 
-  return normalizeItem({
+  const normalized = normalizeItem({
     sourceId: SOURCE_ID,
     sourceName: SOURCE_NAME,
     sourceUrl: doc?.isShownAt || SOURCE_URL,
@@ -75,6 +91,10 @@ function normalizeDplaItem(doc, startYear) {
     license: doc?.rights || null,
     attribution: doc?.provider?.name || null,
   });
+  return {
+    ...normalized,
+    imageUrl: doc?.object || null,
+  };
 }
 
 async function runDplaQuery({ apiKey, q, startYear, endYear, useDateFilter, pageSize }) {
@@ -103,19 +123,22 @@ export async function fetch(scope, startYear, endYear, options = {}) {
   if (!apiKey) return [];
 
   try {
-    const baseQuery = buildQuery(scope);
-    let docs = await runDplaQuery({
-      apiKey,
-      q: baseQuery,
-      startYear,
-      endYear,
-      useDateFilter: true,
-      pageSize: 10,
-    });
+    const queries = buildQueriesForScope(scope);
+    let docs = [];
+    for (const query of queries) {
+      docs = await runDplaQuery({
+        apiKey,
+        q: query,
+        startYear,
+        endYear,
+        useDateFilter: true,
+        pageSize: 10,
+      });
+      if (docs.length > 0) break;
+    }
 
     if (docs.length === 0) {
-      const decade = Math.floor(Number(startYear) / 10) * 10;
-      const fallbackQ = `${baseQuery} ${decade}s`;
+      const fallbackQ = `${buildQuery(scope)} ${Math.floor(Number(startYear) / 10) * 10}s`;
       console.log(`DPLA fallback (broader query): ${fallbackQ}`);
       docs = await runDplaQuery({
         apiKey,

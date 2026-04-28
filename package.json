@@ -34,6 +34,7 @@
     "report:mikesell": "node scripts/generate-report.js --surname mikesell",
     "report:sulc": "node scripts/generate-report.js --surname sulc",
     "book": "node scripts/generate-book.js",
+    "book:person": "node scripts/generate-book.js",
     "validate": "node scripts/validate.js",
     "stats": "node scripts/stats.js"
   },

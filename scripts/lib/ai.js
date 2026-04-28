@@ -132,18 +132,9 @@ function extractEvents(person) {
   return out;
 }
 
-function pickContextForYear(events, targetYear) {
-  if (!Number.isFinite(targetYear) || !Array.isArray(events) || events.length === 0) return null;
-  const ranked = events
-    .filter((e) => Number.isFinite(Number(e?.startYear)))
-    .map((e) => ({ e, dist: Math.abs(Number(e.startYear) - targetYear) }))
-    .sort((a, b) => a.dist - b.dist);
-  return ranked[0]?.e || null;
-}
-
-function buildNarrativeContext(person, events, context = {}) {
-  const birthYear = person?.birth?.dateISO ? new Date(person.birth.dateISO).getFullYear() : null;
-  const deathYear = person?.death?.dateISO ? new Date(person.death.dateISO).getFullYear() : null;
+function buildNarrativeContext(person, context = {}) {
+  const birthYear = yearFromISO(person?.birth?.dateISO);
+  const deathYear = yearFromISO(person?.death?.dateISO);
   const ageAtDeath = birthYear && deathYear ? deathYear - birthYear : null;
 
   const stages = birthYear
@@ -159,8 +150,7 @@ function buildNarrativeContext(person, events, context = {}) {
   const familiesById = context?.familiesById || null;
   const personById = context?.personById || null;
   const marriages = [];
-  const childrenNames = [];
-  let childrenCount = 0;
+  const childIds = new Set();
   const spouseFamilyIds = Array.isArray(person?.familiesAsSpouse) ? person.familiesAsSpouse : [];
   for (const fid of spouseFamilyIds) {
     const fam = familiesById?.get?.(fid);
@@ -176,13 +166,17 @@ function buildNarrativeContext(person, events, context = {}) {
         .join(", "),
     );
     const kids = Array.isArray(fam?.children) ? fam.children : [];
-    childrenCount += kids.length;
     for (const childId of kids) {
-      const child = personById?.get?.(childId);
-      const first = firstWord(cleanName(child?.name?.given || child?.name?.full || ""));
-      if (first) childrenNames.push(first);
+      if (childId) childIds.add(childId);
     }
   }
+  const childrenNames = [];
+  for (const childId of childIds) {
+    const child = personById?.get?.(childId);
+    const first = firstWord(cleanName(child?.name?.given || child?.name?.full || ""));
+    if (first) childrenNames.push(first);
+  }
+  const childrenCount = childIds.size;
 
   const knownFacts = {
     birthDate: person?.birth?.date || null,
@@ -204,18 +198,26 @@ function buildNarrativeContext(person, events, context = {}) {
     knownFacts,
     birthYear,
     deathYear,
-    contextAtBirth: pickContextForYear(events, stages?.birth),
-    contextAtChildhood: pickContextForYear(events, stages?.childhood),
-    contextAtAdulthood: pickContextForYear(events, stages?.comingOfAge),
+    contextAtBirth: context?.lifeStageContext?.atBirth || "",
+    contextAtChildhood: context?.lifeStageContext?.atChildhood || "",
+    contextAtAdulthood: context?.lifeStageContext?.atAdulthood || "",
+    contextAtLateLife: context?.lifeStageContext?.atLateLife || "",
   };
 }
 
 function formatEventLine(event) {
-  if (!event) return "No specific context recorded.";
-  const label = String(event?.event || "").trim();
-  const fact = String(event?.funFact || "").trim();
-  if (label && fact) return `${label} — ${fact}`;
-  return label || fact || "No specific context recorded.";
+  const text = sanitizeNarrativeContextText(String(event || "").trim());
+  return text || "No specific context recorded.";
+}
+
+function sanitizeNarrativeContextText(text) {
+  let out = String(text || "");
+  // Keep statistical context as background only; do not surface these directly in personal narratives.
+  out = out
+    .replace(/[^.]*life expectancy[^.]*\.?/gi, " ")
+    .replace(/[^.]*literacy[^.]*%[^.]*\.?/gi, " ")
+    .replace(/[^.]*climate change[^.]*\.?/gi, " ");
+  return out.replace(/\s+/g, " ").trim();
 }
 
 function formatRecordedEvents(otherEvents) {
@@ -239,9 +241,18 @@ function formatResidences(residences) {
     .join(", ");
 }
 
+function truncateToWords(text, maxWords = 120) {
+  const words = String(text || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
 function templateNarrative(person, context) {
   const name = cleanName(String(person?.name?.full || "")).trim() || "This person";
-  const facts = buildNarrativeContext(person, context?.events || [], context);
+  const facts = buildNarrativeContext(person, context);
   const known = facts.knownFacts;
   const lines = [];
   if (known.birthDate || known.birthPlace) {
@@ -288,6 +299,7 @@ export async function getNarrative(person, context, options) {
   const refresh = Boolean(options?.refresh);
   const noAi = Boolean(options?.noAi);
   const personNameForLog = cleanName(person?.name?.full) || personId;
+  const maxWords = Number.isFinite(Number(options?.maxWords)) ? Math.max(40, Number(options.maxWords)) : 120;
 
   // --no-ai mode must never call Ollama and must not touch the narrative cache.
   // This keeps "dry" or privacy-sensitive runs from writing any derived text to disk.
@@ -299,7 +311,7 @@ export async function getNarrative(person, context, options) {
       console.log(`AI config: model=${model || "(unset)"} base=${baseUrl} noAi=${noAi}`);
     }
     console.log(`Generating narrative for: ${personNameForLog} (via template)`);
-    const text = templateNarrative(person, context);
+    const text = truncateToWords(templateNarrative(person, context), maxWords);
     return { text, source: "template" };
   }
 
@@ -326,7 +338,7 @@ export async function getNarrative(person, context, options) {
 
   if (!model) {
     console.log(`Generating narrative for: ${personNameForLog} (via template)`);
-    const text = templateNarrative(person, context);
+    const text = truncateToWords(templateNarrative(person, context), maxWords);
     writeCachedNarrative(personId, text);
     return { text, source: "template" };
   }
@@ -334,13 +346,13 @@ export async function getNarrative(person, context, options) {
   const ok = await checkOllamaConnectivity({ baseUrl, model });
   if (!ok) {
     console.log(`Generating narrative for: ${personNameForLog} (via template)`);
-    const text = templateNarrative(person, context);
+    const text = truncateToWords(templateNarrative(person, context), maxWords);
     writeCachedNarrative(personId, text);
     return { text, source: "template" };
   }
 
   const name = cleanName(String(person?.name?.full || "")).replace(/\s+/g, " ").trim();
-  const facts = buildNarrativeContext(person, context?.events || [], context);
+  const facts = buildNarrativeContext(person, context);
   const known = facts.knownFacts;
   const prompt = `
 You are writing a brief biography for a printed family history book. Write ONLY from the facts provided. Do not invent any personal details, preferences, hobbies, or personality traits.
@@ -366,6 +378,7 @@ HISTORICAL CONTEXT (what was happening in their world):
   At birth (${facts.stages?.birth ?? "unknown"}): ${formatEventLine(facts.contextAtBirth)}
   In childhood (~${facts.stages?.childhood ?? "unknown"}): ${formatEventLine(facts.contextAtChildhood)}
   In early adulthood (~${facts.stages?.comingOfAge ?? "unknown"}): ${formatEventLine(facts.contextAtAdulthood)}
+  In later life (~${facts.stages?.lateLife ?? "unknown"}): ${formatEventLine(facts.contextAtLateLife)}
 
 WRITE:
   Paragraph 1 (2-3 sentences): Birth, origin, the world they were born into.
@@ -374,9 +387,19 @@ WRITE:
   Final sentence: obituary-style close.
 
 RULES:
+  - Paragraph 1: who this person was — birth, family origin, parents if known; include at most ONE short sentence of historical context.
+  - Paragraph 2: actual life facts only — marriage, children, occupation, residences. If sparse, say that briefly.
+  - Final sentence: death and legacy in obituary style ("NAME passed away in [year/place], survived by [N] children" when known).
+  - Do not repeat historical context beyond one sentence.
+  - Do NOT mention life expectancy statistics.
+  - Do NOT quote literacy rate percentages.
+  - Do NOT mention climate change.
+  - OWID-style statistics are background-only; use them to inform era tone but do not cite them as facts.
   - Never invent hobbies, interests, or personality.
+  - Always write in THIRD PERSON (he/she/they).
+  - Never use "you" or "your".
   - Never use phrases like "known for", "loved by all", "had a passion for", "enjoyed", "was fond of" unless sourced from data.
-  - Maximum 200 words total.
+  - Maximum ${maxWords} words total.
   - Write in past tense, warm but factual tone.
   - If data is sparse, write shorter and do not pad with fiction.
 `.trim();
@@ -388,14 +411,14 @@ RULES:
       { model, prompt, stream: false },
       { timeout: 60_000 },
     );
-    const text = String(res?.data?.response || "").trim();
+    const text = truncateToWords(String(res?.data?.response || "").trim(), maxWords);
     if (!text) throw new Error("Empty response");
     writeCachedNarrative(personId, text);
     return { text, source: "ollama" };
   } catch (error) {
     console.warn(`Ollama generate failed (${error?.message || String(error)}); falling back to templates.`);
     console.log(`Generating narrative for: ${personNameForLog} (via template)`);
-    const text = templateNarrative(person, context);
+    const text = truncateToWords(templateNarrative(person, context), maxWords);
     writeCachedNarrative(personId, text);
     return { text, source: "template" };
   }

@@ -13,6 +13,8 @@ const IMAGE_CACHE_DIR = path.join(projectRoot, "data", "image-cache");
 const ALLOWED_EXTS = new Set(["jpg", "png", "gif", "webp", "bmp"]);
 let cleanedUndefinedCache = false;
 let loggedCacheNote = false;
+let lastWikimediaRequestAt = 0;
+let globalCooldownUntil = 0;
 
 function ensureDir(dirPath) {
   fs.mkdirSync(dirPath, { recursive: true });
@@ -81,23 +83,91 @@ function cleanupUndefinedCacheFiles() {
 }
 
 function buildFallbackQueries(query) {
-  const q = String(query || "").trim();
-  const out = [q];
-  const parts = q
-    .split(",")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  const state = parts.length >= 2 ? parts[parts.length - 2] : "";
-  const county = parts.length >= 3 ? parts[parts.length - 3] : "";
-  if (county && state) out.push(`${county} County, ${state}`);
-  if (state) out.push(`${state} historical photograph`);
-  return out.slice(0, 3);
+  const original = String(query || "").trim();
+  const queries = [original];
+
+  const noHistoric = original.replace(/\s*historic\s*/i, " ").replace(/\s+/g, " ").trim();
+  if (noHistoric) queries.push(noHistoric);
+
+  const base = noHistoric.replace(/\s+county\s+/i, " ").replace(/\s+/g, " ").trim();
+  if (base) {
+    queries.push(`${base} photograph`);
+    queries.push(`${base} courthouse`);
+    queries.push(`${base} downtown`);
+    queries.push(`${base} street`);
+  }
+
+  const parts = original.split(/[,\s]+/).map((p) => p.trim()).filter(Boolean);
+  const stateWords = ["Indiana", "Ohio", "Illinois", "Pennsylvania", "Virginia", "Kentucky"];
+  const state = parts.find((p) => stateWords.includes(p));
+  if (state) {
+    queries.push(`${state} pioneer farm photograph`);
+    queries.push(`${state} historical photograph`);
+  }
+
+  return Array.from(new Set(queries)).slice(0, 5);
 }
 
 function extractYear(text) {
   const matches = String(text || "").match(/\b(1[6-9]\d{2}|20\d{2})\b/g);
   if (!matches || matches.length === 0) return null;
   return Number(matches[0]);
+}
+
+async function enforceWikimediaRateLimit() {
+  const current = Date.now();
+  if (current < globalCooldownUntil) {
+    await new Promise((resolve) => setTimeout(resolve, globalCooldownUntil - current));
+  }
+  const now = Date.now();
+  const elapsed = now - lastWikimediaRequestAt;
+  const minGapMs = 2_000;
+  if (elapsed < minGapMs) {
+    await new Promise((resolve) => setTimeout(resolve, minGapMs - elapsed));
+  }
+  lastWikimediaRequestAt = Date.now();
+}
+
+async function wikimediaGetWithBackoff(url, query, responseType = "json") {
+  const delaysMs = [0, 10_000, 30_000, 60_000];
+  let lastError = null;
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt] > 0) {
+      console.log(`Wikimedia rate limited for ${query}, waiting ${Math.round(delaysMs[attempt] / 1000)}s...`);
+      await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+    }
+    try {
+      await enforceWikimediaRateLimit();
+      return await axios.get(url, {
+        responseType,
+        timeout: 10_000,
+        headers: {
+          "User-Agent": WIKIMEDIA_USER_AGENT,
+          Accept: "application/json",
+        },
+      });
+    } catch (error) {
+      lastError = error;
+      const status = error?.response?.status;
+      if (status !== 429) break;
+      globalCooldownUntil = Date.now() + 120_000;
+    }
+  }
+  throw lastError || new Error("Wikimedia request failed");
+}
+
+function stripHtml(value) {
+  return String(value || "").replace(/<[^>]*>/g, "").trim();
+}
+
+function extractQueryKeywords(query) {
+  const stopWords = new Set(["county", "historic", "historical", "city", "town", "state", "usa", "united", "states", "the", "of", "and"]);
+  return String(query || "")
+    .split(/[^A-Za-z0-9]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .filter((x) => x.length >= 3)
+    .filter((x) => !stopWords.has(x.toLowerCase()));
 }
 
 function storyDecision({ candidate, query, birthYear }) {
@@ -121,10 +191,18 @@ function storyDecision({ candidate, query, birthYear }) {
   }
   if (candidate.width < 100 || candidate.height < 100) return skip("too small/icon-sized");
   if (url.endsWith(".svg") || titleLower.endsWith(".svg")) return skip("svg");
+  if (url.endsWith(".pdf") || titleLower.endsWith(".pdf")) return skip("pdf");
+  if (url.endsWith(".tif") || url.endsWith(".tiff") || titleLower.endsWith(".tif") || titleLower.endsWith(".tiff")) {
+    return skip("tiff");
+  }
+  if (String(candidate?.mimeType || "").toLowerCase().includes("application/pdf")) return skip("pdf mime");
 
   const archiveSource = /uc-nrlf|hathitrust|internet archive/.test(`${source} ${artist}`);
   const looksLikeBookTitle = /volume|vol\.|novel|poems|catalog|transactions|proceedings|copy|book/i.test(titleNoPrefix);
   if (archiveSource && looksLikeBookTitle) return skip("book cover scan source");
+  if (/watershed|drain|soil survey|gazetteer|business directory|encyclopedia|cyclopedia|proceedings|quarterly|academy of science/i.test(`${title} ${desc}`)) {
+    return skip("document/archive text");
+  }
 
   let score = 0;
 
@@ -190,9 +268,21 @@ function storyDecision({ candidate, query, birthYear }) {
   }
 
   // Bonuses / penalties
+  if (url.endsWith(".jpg") || url.endsWith(".jpeg")) score += 5;
+  else if (url.endsWith(".png")) score += 5;
+  else if (url.endsWith(".webp") || url.endsWith(".gif")) score += 3;
+
   if (candidate.width > candidate.height) score += 3;
   if (candidate.width >= 800) score += 2;
   if (queryLower && (titleLower.includes(queryLower) || descLower.includes(queryLower))) score += 2;
+  const queryKeywords = extractQueryKeywords(query);
+  if (queryKeywords.length) {
+    const titleMatchCount = queryKeywords.filter((k) => titleLower.includes(k.toLowerCase())).length;
+    if (titleMatchCount > 0) score += 3;
+  }
+  if (/\b[A-Z][a-z]+ [A-Z][a-z]+\b/.test(titleNoPrefix) && !/(county|city|town|street|school|courthouse|church|depot|railroad)/i.test(titleNoPrefix)) {
+    score -= 2;
+  }
   if (birthYear && Number.isFinite(birthYear)) {
     const eventYear = extractYear(`${title} ${desc}`);
     if (eventYear !== null && Math.abs(eventYear - birthYear) <= 50) score += 1;
@@ -220,13 +310,7 @@ async function searchCommons(query, { birthYear = null, placeName = null } = {})
   console.log("Wikimedia search:", query);
   let res;
   try {
-    res = await axios.get(url, {
-      timeout: 10_000,
-      headers: {
-        "User-Agent": WIKIMEDIA_USER_AGENT,
-        Accept: "application/json",
-      },
-    });
+    res = await wikimediaGetWithBackoff(url, query, "json");
   } catch (error) {
     console.log("Wikimedia error:", query, "-", error?.message || String(error));
     return [];
@@ -246,6 +330,7 @@ async function searchCommons(query, { birthYear = null, placeName = null } = {})
       const desc = String(info?.extmetadata?.ImageDescription?.value || "");
       const source = String(info?.extmetadata?.Source?.value || "");
       const artist = String(info?.extmetadata?.Artist?.value || "");
+      const mimeType = String(info?.mime || info?.mediatype || info?.extmetadata?.MIMEType?.value || "");
       const isSvg = title.toLowerCase().endsWith(".svg");
       return {
         title,
@@ -258,6 +343,7 @@ async function searchCommons(query, { birthYear = null, placeName = null } = {})
         license: ext || null,
         attribution: info?.extmetadata?.Attribution?.value || info?.extmetadata?.Artist?.value || null,
         licenseUrl: info?.extmetadata?.LicenseUrl?.value || null,
+        mimeType,
         isSvg,
       };
     })
@@ -286,14 +372,7 @@ async function searchCommons(query, { birthYear = null, placeName = null } = {})
 }
 
 async function downloadImageWithMetadata(imageUrl) {
-  const response = await axios.get(imageUrl, {
-    responseType: "arraybuffer",
-    timeout: 10_000,
-    headers: {
-      "User-Agent": WIKIMEDIA_USER_AGENT,
-      Accept: "application/json",
-    },
-  });
+  const response = await wikimediaGetWithBackoff(imageUrl, imageUrl, "arraybuffer");
   const contentType = response?.headers?.["content-type"] || "";
   const ext = detectExtension({ contentType, imageUrl });
   return {
@@ -313,7 +392,13 @@ export async function getCachedOrFetchCommonsImage(query, options = {}) {
   const basePath = imageCachePath(query);
   const existing = findExistingCachedPath(basePath);
   if (existing) {
-    return { cachePath: existing.cachePath, metadata: null, source: "cache", ext: existing.ext, mimeType: existing.mimeType };
+    try {
+      const buffer = fs.readFileSync(existing.cachePath);
+      if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+      return { cachePath: existing.cachePath, metadata: null, source: "cache", ext: existing.ext, mimeType: existing.mimeType, buffer };
+    } catch {
+      return null;
+    }
   }
 
   ensureDir(IMAGE_CACHE_DIR);
@@ -322,41 +407,50 @@ export async function getCachedOrFetchCommonsImage(query, options = {}) {
   const attempts = buildFallbackQueries(query);
   let selected = null;
   let selectedQuery = query;
-  for (let index = 0; index < attempts.length; index++) {
+  const totalAttempts = Math.min(attempts.length, 5);
+  for (let index = 0; index < totalAttempts; index++) {
     const attemptQuery = attempts[index];
     const candidates = await searchCommons(attemptQuery, {
       birthYear: options?.birthYear ?? null,
       placeName: query,
     });
-    if (index > 0) {
-      console.log(`Wikimedia fallback (${index + 1}/3): ${attemptQuery} → ${candidates.length} images`);
-    }
+    console.log(`Wikimedia fallback (${index + 1}/${totalAttempts}): ${attemptQuery} → ${candidates.length} images`);
     const best = candidates[0] || null;
-    if (best && best.score >= 0) {
+    if (best && best.score > 0) {
       selected = best;
       selectedQuery = attemptQuery;
       break;
     }
   }
 
-  if (!selected) return { cachePath: null, metadata: null, source: "none", ext: null, mimeType: null };
+  if (!selected) return null;
 
   console.log(`Wikimedia selected: ${selected.title} (score: ${selected.score})`);
 
   try {
     const downloaded = await downloadImageWithMetadata(selected.thumb);
+    if (!downloaded?.buffer || !Buffer.isBuffer(downloaded.buffer) || downloaded.buffer.length === 0) return null;
     const finalCachePath = cachePathForExt(basePath, downloaded.ext);
     fs.writeFileSync(finalCachePath, downloaded.buffer);
     return {
       cachePath: finalCachePath,
-      metadata: selected,
+      metadata: {
+        ...selected,
+        title: String(selected?.title || "").replace(/^File:/i, ""),
+        license: selected?.license || "unknown",
+        attribution: stripHtml(selected?.attribution || selected?.artist || ""),
+      },
       source: selectedQuery === query ? "wikimedia" : "wikimedia-fallback",
       ext: downloaded.ext,
       mimeType: downloaded.mimeType,
       buffer: downloaded.buffer,
+      title: String(selected?.title || "").replace(/^File:/i, ""),
+      url: selected?.thumb || "",
+      license: selected?.license || "unknown",
+      attribution: stripHtml(selected?.attribution || selected?.artist || ""),
     };
   } catch (error) {
     console.log("Wikimedia error:", query, "-", error?.message || String(error));
-    return { cachePath: null, metadata: selected, source: "download-error", ext: null, mimeType: null };
+    return null;
   }
 }

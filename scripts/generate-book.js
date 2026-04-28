@@ -21,7 +21,6 @@ import {
   Table,
   TableCell,
   TableOfContents,
-  TableLayoutType,
   TableRow,
   TextRun,
   WidthType,
@@ -32,6 +31,7 @@ import { getLatestConvertedJsonPath } from "./_json-latest.js";
 import { getNarrative } from "./lib/ai.js";
 import { getCachedOrFetchCommonsImage } from "./lib/wikimedia.js";
 import { detectFamilyHomelands, getPlaceImage, getPlaceSummary } from "./lib/places.js";
+import { getLifeStageContext, getContext } from "./lib/context.js";
 
 dotenv.config();
 
@@ -54,6 +54,10 @@ function parseArgs(argv) {
     generation: null,
     surname: null,
     surnames: null,
+    person: null,
+    ancestors: 3,
+    descendants: 3,
+    includeSpouses: false,
     refresh: false,
     noImages: false,
     noAi: false,
@@ -65,6 +69,10 @@ function parseArgs(argv) {
     if (a === "--generation") args.generation = Number(argv[i + 1] || ""), i++;
     else if (a === "--surname") args.surname = String(argv[i + 1] || ""), i++;
     else if (a === "--surnames") args.surnames = String(argv[i + 1] || ""), i++;
+    else if (a === "--person") args.person = String(argv[i + 1] || ""), i++;
+    else if (a === "--ancestors") args.ancestors = Math.min(6, Math.max(0, Number(argv[i + 1] || 3))), i++;
+    else if (a === "--descendants") args.descendants = Math.min(6, Math.max(0, Number(argv[i + 1] || 3))), i++;
+    else if (a === "--include-spouses") args.includeSpouses = true;
     else if (a === "--refresh") args.refresh = true;
     else if (a === "--no-images") args.noImages = true;
     else if (a === "--no-ai") args.noAi = true;
@@ -101,8 +109,16 @@ function slugifySurname(value) {
 
 function displayName(person) {
   const full = cleanName(person?.name?.full);
-  if (full) return full;
-  const parts = [cleanName(person?.name?.given), cleanName(person?.name?.surname)].filter(Boolean);
+  const surname = cleanName(person?.name?.surname);
+  if (full) {
+    const fullLower = full.toLowerCase();
+    const surnameLower = surname.toLowerCase();
+    if (surname && !fullLower.includes(surnameLower)) {
+      return cleanName(`${full} ${surname}`);
+    }
+    return full;
+  }
+  const parts = [cleanName(person?.name?.given), surname].filter(Boolean);
   return cleanName(parts.join(" ")) || "Unknown";
 }
 
@@ -255,7 +271,7 @@ function table2Col(rows) {
     });
   });
   return new Table({
-    layout: { type: TableLayoutType.FIXED },
+    columnWidths: [4680, 4680],
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [header, ...bodyRows],
   });
@@ -271,168 +287,69 @@ function pickMostCommon(values) {
   return best ? best[0] : "";
 }
 
-function buildGenerationMap({ individuals, families }) {
+function medianBirthYearForPeople(people) {
+  const years = (Array.isArray(people) ? people : [])
+    .map((p) => yearFromISO(p?.birth?.dateISO))
+    .filter((y) => Number.isFinite(y))
+    .sort((a, b) => a - b);
+  if (!years.length) return null;
+  return years[Math.floor(years.length / 2)];
+}
+
+function generationFromBirthYear(year) {
+  if (!Number.isFinite(year)) return null;
+  if (year < 1750) return 1;
+  if (year < 1800) return 2;
+  if (year < 1850) return 3;
+  if (year < 1900) return 4;
+  if (year < 1950) return 5;
+  if (year < 2000) return 6;
+  return 7;
+}
+
+function generationRangeLabel(generationNumber) {
+  const ranges = {
+    1: "pre-1750",
+    2: "1750 to 1799",
+    3: "1800 to 1849",
+    4: "1850 to 1899",
+    5: "1900 to 1949",
+    6: "1950 to 1999",
+    7: "2000+",
+  };
+  return ranges[generationNumber] || "Unknown";
+}
+
+function buildGenerationMap({ individuals }) {
   const personById = new Map(individuals.filter((p) => p?.id).map((p) => [p.id, p]));
-
-  const childrenByParent = new Map();
-  for (const fam of families) {
-    const children = Array.isArray(fam?.children) ? fam.children : [];
-    const parents = [fam?.husband, fam?.wife].filter(Boolean);
-    for (const parentId of parents) {
-      if (!childrenByParent.has(parentId)) childrenByParent.set(parentId, new Set());
-      const set = childrenByParent.get(parentId);
-      for (const childId of children) set.add(childId);
-    }
-  }
-
-  const roots = individuals
-    .filter((p) => p?.id)
-    .filter((p) => !Array.isArray(p.familiesAsChild) || p.familiesAsChild.length === 0)
-    .map((p) => p.id);
-
   const generation = new Map();
-  const queue = [];
-  for (const r of roots) {
-    generation.set(r, 1);
-    queue.push(r);
+  for (const person of individuals) {
+    const year = yearFromISO(person?.birth?.dateISO);
+    const g = generationFromBirthYear(year);
+    if (person?.id && g !== null) generation.set(person.id, g);
   }
-
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const g = generation.get(current);
-    const kids = childrenByParent.get(current);
-    if (!kids) continue;
-    for (const childId of kids) {
-      if (!personById.has(childId)) continue;
-      const nextG = g + 1;
-      if (!generation.has(childId) || nextG < generation.get(childId)) {
-        generation.set(childId, nextG);
-        queue.push(childId);
-      }
-    }
-  }
-
   const maxGen = Math.max(0, ...Array.from(generation.values()));
-  return { generation, maxGen, childrenByParent, personById };
+  return { generation, maxGen, personById };
 }
 
-function readHistoricalContext() {
-  const p = path.join(projectRoot, "data", "historical-context.json");
-  const parsed = JSON.parse(fs.readFileSync(p, "utf-8"));
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && typeof parsed === "object" && Array.isArray(parsed.events)) return parsed.events;
-  throw new Error("historical-context.json must be an array or an object with an events[] array");
+function lifeStageBulletsFromContext(ctx) {
+  const lines = [ctx?.atBirth, ctx?.atChildhood, ctx?.atAdulthood, ctx?.atLateLife]
+    .map((s) => String(s || "").trim())
+    .filter(Boolean);
+  return lines.slice(0, 5);
 }
 
-function inferContinentFromCountry(country) {
-  const c = String(country || "").toLowerCase();
-  if (!c) return "";
-  if (/(united states|usa|canada|mexico|brazil|argentina|chile|peru|colombia|haiti|cuba|jamaica|venezuela)/.test(c)) {
-    return "Americas";
-  }
-  if (/(england|scotland|wales|ireland|uk|united kingdom|france|germany|italy|spain|portugal|poland|ukraine|russia|sweden|norway|denmark|finland|czech|bohemia|austria|hungary|greece|turkey|netherlands|belgium)/.test(c)) {
-    return "Europe";
-  }
-  if (/(china|japan|korea|india|pakistan|bangladesh|vietnam|thailand|philippines|indonesia|malaysia|singapore|afghanistan|iran|iraq|syria|israel|palestine|saudi|arabia|egypt)/.test(c)) {
-    return "Asia";
-  }
-  if (/(nigeria|ethiopia|kenya|ghana|south africa|rwanda|uganda|sudan|algeria|morocco|tunisia|angola|congo|zimbabwe)/.test(c)) {
-    return "Africa";
-  }
-  if (/(australia|new zealand|oceania)/.test(c)) {
-    return "Oceania";
-  }
-  if (/(middle east)/.test(c)) return "Middle East";
-  return "";
-}
-
-function matchEventsForPerson(person, events) {
-  const by = yearFromISO(person?.birth?.dateISO);
-  if (by === null) return [];
-  const dyRaw = yearFromISO(person?.death?.dateISO);
-  const assumedDeath = dyRaw ?? by + 80;
-  const birthCountry = countryFromPlace(person?.birth?.place || "");
-  const birthContinent = inferContinentFromCountry(birthCountry);
-  const minAgeYear = by + 5;
-  const maxAgeYear = Math.min(by + 75, assumedDeath);
-
-  const scored = events
-    .map((e) => {
-      if (!e || typeof e !== "object") return null;
-      const start = Number(e.startYear);
-      const end = Number(e.endYear);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
-
-      // Only show events that start when the person is age 5–75 (or until death).
-      if (start < minAgeYear || start > maxAgeYear) return null;
-
-      const ageAtStart = start - by;
-      let score = 0;
-      if (ageAtStart >= 10 && ageAtStart <= 40) score += 6;
-      else if (ageAtStart >= 5 && ageAtStart <= 75) score += 2;
-      score += Math.max(0, 12 - Math.abs(ageAtStart - 30));
-
-      // Origin match (highest priority).
-      const origins = Array.isArray(e.relevantOrigins) ? e.relevantOrigins : [];
-      const birthLower = birthCountry.toLowerCase();
-      if (birthLower && origins.some((o) => birthLower.includes(String(o).toLowerCase()))) score += 6;
-
-      // Continent match (next priority).
-      const continent = String(e.continent || "").toLowerCase();
-      if (birthContinent && continent && continent === birthContinent.toLowerCase()) score += 3;
-
-      // Always allow Global events, but don't dominate.
-      const region = String(e.region || "");
-      if (region === "Global") score += 2;
-
-      return { ...e, _score: score, _region: region, _ageAtStart: ageAtStart, _start: start };
-    })
-    .filter(Boolean)
-    .sort((a, b) => b._score - a._score);
-
-  return scored;
-}
-
-function selectNarrativeEvents(allEvents) {
-  // Prefer events when age 10–40, and closest to the 20–35 band.
-  const filtered = allEvents.filter((e) => Number.isFinite(e?._ageAtStart) && e._ageAtStart >= 10 && e._ageAtStart <= 40);
-  const sorted = (filtered.length ? filtered : allEvents)
-    .slice()
-    .sort((a, b) => Math.abs(a._ageAtStart - 28) - Math.abs(b._ageAtStart - 28));
-  return sorted.slice(0, 2);
-}
-
-function selectLifeTimesEvents(allEvents) {
-  // Mix: 1–2 early (5–25), 1–2 middle (26–50), 1 late (51–75) when available.
-  const byAge = (min, max) =>
-    allEvents
-      .filter((e) => Number.isFinite(e?._ageAtStart) && e._ageAtStart >= min && e._ageAtStart <= max)
-      .slice()
-      .sort((a, b) => b._score - a._score);
-
-  const early = byAge(5, 25).slice(0, 2);
-  const mid = byAge(26, 50).slice(0, 2);
-  const late = byAge(51, 75).slice(0, 1);
-
-  const combined = [...early, ...mid, ...late];
-  const uniq = [];
-  for (const e of combined) {
-    if (uniq.some((x) => x.event === e.event && x.startYear === e.startYear && x.endYear === e.endYear)) continue;
-    uniq.push(e);
-    if (uniq.length >= 5) break;
-  }
-
-  // Include up to 1–2 global events if none present, without exceeding 5.
-  if (uniq.length < 5) {
-    const globals = allEvents.filter((e) => e._region === "Global").slice(0, 2);
-    for (const g of globals) {
-      if (uniq.some((x) => x.event === g.event && x.startYear === g.startYear && x.endYear === g.endYear)) continue;
-      uniq.push(g);
-      if (uniq.length >= 5) break;
+async function getUnusedSidebar(year, usedSet, seedBase) {
+  if (!Number.isFinite(year)) return null;
+  for (let v = 0; v < 3; v++) {
+    const text = String(await getContext(year, "world", "global", `${seedBase}-v${v}`) || "").trim();
+    if (!text) continue;
+    if (!usedSet.has(text)) {
+      usedSet.add(text);
+      return text;
     }
   }
-
-  return uniq.slice(0, 5);
+  return null;
 }
 
 async function findLocalPortrait(person) {
@@ -471,7 +388,7 @@ async function imageRunFromFile(imagePath, extHint = null) {
 
 function placeholderBox(text) {
   return new Table({
-    layout: { type: TableLayoutType.FIXED },
+    columnWidths: [9360],
     width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
     rows: [
       new TableRow({
@@ -514,30 +431,224 @@ function personConnectionsBox({ person, personById, familiesById }) {
   }
   if (parentNames.length) lines.push(`Parents: ${parentNames.join(" + ")}`);
 
-  // Marriage + spouse
+  // Marriage + spouse(s)
   const fams = Array.isArray(person?.familiesAsSpouse) ? person.familiesAsSpouse : [];
+  const marriageLines = [];
   if (fams.length) {
-    const fam = familiesById.get(fams[0]);
-    if (fam) {
+    for (const fid of fams) {
+      const fam = familiesById.get(fid);
+      if (!fam) continue;
       const spouseId = fam.husband === person.id ? fam.wife : fam.husband;
       const spouse = spouseId ? personById.get(spouseId) : null;
-      const year = yearFromISO(fam?.marriage?.dateISO);
-      const place = fam?.marriage?.place || "";
       if (spouse) {
-        lines.push(`Married: ${displayName(spouse)}${year ? `, ${year}` : ""}${place ? `, ${place}` : ""}`);
+        const spouseBirthYear = yearFromISO(spouse?.birth?.dateISO);
+        const spouseDeathYear = yearFromISO(spouse?.death?.dateISO);
+        marriageLines.push(`Married: ${displayName(spouse)} (${spouseBirthYear ?? "?"}-${spouseDeathYear ?? "?"})`);
       }
-      const children = Array.isArray(fam?.children) ? fam.children : [];
-      const childNames = children
-        .map((cid) => personById.get(cid))
-        .filter(Boolean)
-        .slice(0, 12)
-        .map(displayName);
-      if (childNames.length) lines.push(`Children: ${childNames.join(", ")}`);
     }
+  }
+  if (marriageLines.length) lines.push(...marriageLines);
+
+  // Children across all spouse families
+  if (fams.length) {
+    const childNames = [];
+    for (const fid of fams) {
+      const fam = familiesById.get(fid);
+      if (!fam) continue;
+      for (const cid of fam.children || []) {
+        const child = personById.get(cid);
+        if (child) childNames.push(displayName(child));
+      }
+    }
+    if (childNames.length) lines.push(`Children: ${Array.from(new Set(childNames)).slice(0, 12).join(", ")}`);
   }
 
   const text = lines.length ? lines.join("  ") : "Family connections: (not enough data yet)";
   return shadedBlock({ text, fill: "F2F2F2" });
+}
+
+function relationshipSubtitle({ person, personById, familiesById }) {
+  const famc = Array.isArray(person?.familiesAsChild) ? person.familiesAsChild : [];
+  for (const fid of famc) {
+    const fam = familiesById.get(fid);
+    if (!fam) continue;
+    const father = fam.husband ? personById.get(fam.husband) : null;
+    const mother = fam.wife ? personById.get(fam.wife) : null;
+    const fatherName = father ? displayName(father) : "";
+    const motherName = mother ? displayName(mother) : "";
+    if (fatherName || motherName) {
+      const role = person?.sex === "M" ? "Son" : person?.sex === "F" ? "Daughter" : "Child";
+      if (fatherName && motherName) return `${role} of ${fatherName} and ${motherName}`;
+      if (fatherName) return `${role} of ${fatherName}`;
+      return `${role} of ${motherName}`;
+    }
+  }
+
+  const fams = Array.isArray(person?.familiesAsSpouse) ? person.familiesAsSpouse : [];
+  for (const fid of fams) {
+    const fam = familiesById.get(fid);
+    if (!fam) continue;
+    const spouseId = fam.husband === person?.id ? fam.wife : fam.husband;
+    const spouse = spouseId ? personById.get(spouseId) : null;
+    const spouseName = spouse ? displayName(spouse) : "";
+    if (spouseName) {
+      const role = person?.sex === "M" ? "Husband" : person?.sex === "F" ? "Wife" : "Spouse";
+      return `${role} of ${spouseName}`;
+    }
+  }
+
+  return null;
+}
+
+function levenshteinDistance(a, b) {
+  const s = String(a || "");
+  const t = String(b || "");
+  const dp = Array.from({ length: s.length + 1 }, () => Array(t.length + 1).fill(0));
+  for (let i = 0; i <= s.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= t.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= s.length; i++) {
+    for (let j = 1; j <= t.length; j++) {
+      const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+    }
+  }
+  return dp[s.length][t.length];
+}
+
+function findAnchorPerson(individuals, query) {
+  const qRaw = String(query || "").trim();
+  if (!qRaw) return { anchor: null, suggestions: [] };
+  const byId = new Map((individuals || []).filter((p) => p?.id).map((p) => [p.id, p]));
+  if (qRaw.startsWith("@") || /^P\d+$/i.test(qRaw)) {
+    const id = qRaw.startsWith("@") ? qRaw : `@${qRaw.toUpperCase()}@`;
+    const anchor = byId.get(id) || null;
+    return { anchor, suggestions: [] };
+  }
+
+  const q = qRaw.toLowerCase();
+  const exact = (individuals || []).find((p) => cleanName(p?.name?.full || "").toLowerCase() === q);
+  if (exact) return { anchor: exact, suggestions: [] };
+
+  const partial = (individuals || []).filter((p) => cleanName(p?.name?.full || "").toLowerCase().includes(q));
+  if (partial.length === 1) return { anchor: partial[0], suggestions: [] };
+  if (partial.length > 1) {
+    const deceased = partial.filter((p) => !isLiving(p));
+    const anchor = deceased[0] || partial[0];
+    return { anchor, suggestions: partial.slice(0, 5) };
+  }
+
+  const scored = (individuals || [])
+    .map((p) => {
+      const n = cleanName(p?.name?.full || "").toLowerCase();
+      return { p, d: levenshteinDistance(n, q) };
+    })
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 5)
+    .map((x) => x.p);
+  return { anchor: null, suggestions: scored };
+}
+
+function getAncestors(personId, individuals, families, levels) {
+  const result = new Map();
+  const personById = new Map((individuals || []).map((p) => [p.id, p]));
+  const familyById = new Map((families || []).map((f) => [f.id, f]));
+  function traverse(id, level) {
+    if (level < -levels) return;
+    const person = personById.get(id);
+    if (!person) return;
+    if (!result.has(id) || level > result.get(id)) result.set(id, level);
+    for (const famId of person.familiesAsChild || []) {
+      const fam = familyById.get(famId);
+      if (!fam) continue;
+      if (fam.husband) traverse(fam.husband, level - 1);
+      if (fam.wife) traverse(fam.wife, level - 1);
+    }
+  }
+  traverse(personId, 0);
+  return result;
+}
+
+function getDescendants(personId, individuals, families, levels, options = {}) {
+  const includeSpouses = Boolean(options.includeSpouses);
+  const result = new Map();
+  const personById = new Map((individuals || []).map((p) => [p.id, p]));
+  const familyById = new Map((families || []).map((f) => [f.id, f]));
+  function traverse(id, level) {
+    if (level > levels) return;
+    const person = personById.get(id);
+    if (!person) return;
+    if (level > 0) result.set(id, level);
+    for (const famId of person.familiesAsSpouse || []) {
+      const fam = familyById.get(famId);
+      if (!fam) continue;
+      const spouseId = fam.husband === id ? fam.wife : fam.husband;
+      if (includeSpouses && spouseId && level > 0 && !result.has(spouseId)) result.set(spouseId, level);
+      for (const childId of fam.children || []) {
+        if (!result.has(childId)) traverse(childId, level + 1);
+      }
+    }
+  }
+  traverse(personId, 0);
+  return result;
+}
+
+function ancestorLevelLabel(level) {
+  const map = { 1: "Parents", 2: "Grandparents", 3: "Great-Grandparents", 4: "2x Great-Grandparents", 5: "3x Great-Grandparents", 6: "4x Great-Grandparents" };
+  return map[level] || `Ancestors Level ${level}`;
+}
+
+function descendantLevelLabel(level) {
+  const map = { 1: "Children", 2: "Grandchildren", 3: "Great-Grandchildren", 4: "2x Great-Grandchildren", 5: "3x Great-Grandchildren", 6: "4x Great-Grandchildren" };
+  return map[level] || `Descendants Level ${level}`;
+}
+
+function formatYears(person) {
+  const b = person?.birth?.dateISO ? String(person.birth.dateISO).slice(0, 4) : "?";
+  const d = person?.death?.dateISO
+    ? String(person.death.dateISO).slice(0, 4)
+    : person?.living === true
+      ? "living"
+      : "";
+  return d ? `(${b}-${d})` : `(b.${b})`;
+}
+
+function buildAsciiTree({ anchor, ancestorsMap, descendantsMap, personById }) {
+  const lines = [];
+
+  // Ancestors (oldest first: most negative level to -1)
+  const ancestorLevels = Array.from(new Set(Array.from(ancestorsMap.values()).filter((l) => l < 0))).sort((a, b) => a - b);
+  for (const level of ancestorLevels) {
+    const people = Array.from(ancestorsMap.entries())
+      .filter(([, l]) => l === level)
+      .map(([id]) => personById.get(id))
+      .filter(Boolean)
+      .sort((a, b) => (yearFromISO(a?.birth?.dateISO) || 9999) - (yearFromISO(b?.birth?.dateISO) || 9999));
+    lines.push(ancestorLevelLabel(Math.abs(level)).toUpperCase());
+    for (const p of people) lines.push(`  ${displayName(p)} ${formatYears(p)}`);
+    lines.push("  |");
+  }
+
+  // Anchor
+  lines.push("");
+  lines.push(`>>> ${displayName(anchor).toUpperCase()} ${formatYears(anchor)} <<<`);
+  lines.push("  |");
+
+  // Descendants (nearest to furthest)
+  const descendantLevels = Array.from(new Set(Array.from(descendantsMap.values()).filter((l) => l > 0))).sort((a, b) => a - b);
+  for (const level of descendantLevels) {
+    const people = Array.from(descendantsMap.entries())
+      .filter(([, l]) => l === level)
+      .map(([id]) => personById.get(id))
+      .filter(Boolean)
+      .sort((a, b) => (yearFromISO(a?.birth?.dateISO) || 9999) - (yearFromISO(b?.birth?.dateISO) || 9999));
+    const deceased = people.filter((p) => p?.living !== true);
+    const living = people.filter((p) => p?.living === true);
+    lines.push(descendantLevelLabel(level).toUpperCase());
+    for (const p of deceased) lines.push(`  ${displayName(p)} ${formatYears(p)}`);
+    if (living.length > 0) lines.push(`  + ${living.length} living (names withheld)`);
+  }
+
+  return lines;
 }
 
 function bulletList(items, numbering) {
@@ -647,7 +758,7 @@ function buildGenerationPlaceIndex({ people, familiesById, personById }) {
       const rs = regionStats.get(key);
       rs.count += 1;
       if (!regionPeople.has(key)) regionPeople.set(key, []);
-      regionPeople.get(key).push({ name: displayName(p), year: y });
+      regionPeople.get(key).push({ id: p?.id, name: displayName(p), year: y });
     }
   }
 
@@ -672,8 +783,253 @@ async function generateBook() {
   const families = Array.isArray(data.families) ? data.families : [];
   const familiesById = new Map(families.filter((f) => f?.id).map((f) => [f.id, f]));
 
-  const { generation, maxGen, childrenByParent, personById } = buildGenerationMap({ individuals, families });
-  const events = readHistoricalContext();
+  const { generation, maxGen, personById } = buildGenerationMap({ individuals });
+  const numberingRef = "book-bullets";
+
+  if (args.person) {
+    const { anchor, suggestions } = findAnchorPerson(individuals, args.person);
+    if (!anchor) {
+      console.log(`Person not found: '${args.person}'`);
+      if (suggestions.length) {
+        console.log("Did you mean:");
+        for (const p of suggestions.slice(0, 5)) {
+          console.log(`  ${p.id} — ${displayName(p)} (b.${yearFromISO(p?.birth?.dateISO) || "unknown"})`);
+        }
+      }
+      console.log("Use --person '@ID@' for exact match");
+      return;
+    }
+
+    const ancestorsMap = getAncestors(anchor.id, individuals, families, args.ancestors);
+    const descendantsMap = getDescendants(anchor.id, individuals, families, args.descendants, { includeSpouses: args.includeSpouses });
+    const ancestorIds = Array.from(ancestorsMap.entries()).filter(([, l]) => l < 0).map(([id]) => id);
+    const descendantIds = Array.from(descendantsMap.keys());
+    const includedIds = new Set([anchor.id, ...ancestorIds, ...descendantIds]);
+    const includedPeople = Array.from(includedIds).map((id) => personById.get(id)).filter(Boolean);
+    const livingDescendants = descendantIds.map((id) => personById.get(id)).filter((p) => p?.living === true);
+
+    const anchorName = displayName(anchor);
+    const anchorFirst = firstName(anchor).toLowerCase() || "person";
+    const anchorSurname = (normalizeSurname(anchor?.name?.surname) || "family").toLowerCase();
+    const dateStr = format(new Date(), "yyyy-MM-dd");
+    const outDir = path.join(projectRoot, "reports");
+    fs.mkdirSync(outDir, { recursive: true });
+    const outPath = path.join(outDir, `family-book-${anchorFirst}-${anchorSurname}-${dateStr}.docx`);
+
+    const by = includedPeople.map((p) => yearFromISO(p?.birth?.dateISO)).filter((y) => y !== null);
+    const dy = includedPeople
+      .map((p) => yearFromISO(p?.death?.dateISO))
+      .filter((y) => y !== null);
+    const minYear = by.length ? Math.min(...by) : null;
+    const maxYear = dy.length ? Math.max(...dy) : by.length ? Math.max(...by) : null;
+
+    console.log(`Person-anchored book: ${anchorName} (${anchor.id})`);
+    console.log(`Ancestors: ${args.ancestors} levels (${ancestorIds.length} individuals)`);
+    console.log(`Descendants: ${args.descendants} levels (${descendantIds.length} individuals)`);
+    console.log(`Living descendants: ${livingDescendants.length} (names only)`);
+    console.log(`Total included: ${includedPeople.length} individuals`);
+    console.log(`Generating: ${path.basename(outPath)}`);
+
+    const children = [];
+    children.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 800, after: 120 },
+        children: [new TextRun({ text: `The Family of ${anchorName}`, font: "Arial", size: 54, bold: true, color: "1F3864" })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: `${args.ancestors} Generations Back · ${args.descendants} Generations Forward`, font: "Arial", size: 28 })],
+      }),
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [new TextRun({ text: `${minYear || "?"} — ${maxYear || "?"}`, font: "Arial", size: 24, color: "666666" })],
+      }),
+      new Paragraph({ pageBreakBefore: true }),
+    );
+
+    const ancestorLevels = Array.from(new Set(Array.from(ancestorsMap.values()).filter((l) => l < 0).map((l) => Math.abs(l)))).sort((a, b) => b - a);
+    for (const level of ancestorLevels) {
+      const people = Array.from(ancestorsMap.entries())
+        .filter(([, l]) => Math.abs(l) === level)
+        .map(([id]) => personById.get(id))
+        .filter((p) => p && p?.living !== true)
+        .sort((a, b) => (yearFromISO(a?.birth?.dateISO) || 9999) - (yearFromISO(b?.birth?.dateISO) || 9999));
+      children.push(heading(ancestorLevelLabel(level), 1), body(`Included ancestors at this level: ${people.length}`));
+      for (const person of people) {
+        const relation = relationshipSubtitle({ person, personById, familiesById });
+        const lifeStageContext = await getLifeStageContext(person);
+        const { text: narrative } = await getNarrative(person, { lifeStageContext, familiesById, personById }, { refresh: args.refresh, noAi: args.noAi });
+        children.push(
+          heading(displayName(person), 2),
+          ...(relation ? [body(relation)] : []),
+          body(narrative),
+          divider(),
+        );
+      }
+      children.push(new Paragraph({ pageBreakBefore: true }));
+    }
+
+    // Anchor chapter
+    const anchorContext = await getLifeStageContext(anchor);
+    const { text: anchorNarrative } = await getNarrative(
+      anchor,
+      { lifeStageContext: anchorContext, familiesById, personById },
+      { refresh: args.refresh, noAi: args.noAi, maxWords: 200 },
+    );
+    children.push(heading(`The Life of ${anchorName}`, 1), body(anchorNarrative));
+
+    const timelineRows = [];
+    const seenTimeline = new Set();
+    const addTimeline = (year, age, event, eventType = "Event") => {
+      if (!Number.isFinite(year)) return;
+      const key = `${year}|${String(eventType || "").toUpperCase()}`;
+      if (seenTimeline.has(key)) return;
+      seenTimeline.add(key);
+      timelineRows.push([String(year), age !== null ? String(age) : "—", event]);
+    };
+    const anchorBirthYear = yearFromISO(anchor?.birth?.dateISO);
+    addTimeline(anchorBirthYear, 0, `Born${anchor?.birth?.place ? ` in ${anchor.birth.place}` : ""}`, "BIRT");
+    for (const fid of anchor?.familiesAsSpouse || []) {
+      const fam = familiesById.get(fid);
+      if (!fam) continue;
+      const my = yearFromISO(fam?.marriage?.dateISO);
+      addTimeline(my, anchorBirthYear !== null && my !== null ? my - anchorBirthYear : null, `Married${fam?.marriage?.place ? ` in ${fam.marriage.place}` : ""}`, "MARR");
+      for (const cid of fam?.children || []) {
+        const child = personById.get(cid);
+        const cy = yearFromISO(child?.birth?.dateISO);
+        addTimeline(cy, anchorBirthYear !== null && cy !== null ? cy - anchorBirthYear : null, `Child born: ${displayName(child)}`, `CHIL-${cid}`);
+      }
+    }
+    for (const e of anchor?.events || []) {
+      const ey = yearFromISO(e?.dateISO);
+      const eType = String(e?.type || "Event").toUpperCase();
+      addTimeline(ey, anchorBirthYear !== null && ey !== null ? ey - anchorBirthYear : null, `${e?.type || "Event"}${e?.place ? `, ${e.place}` : ""}`, eType);
+    }
+    const anchorDeathYear = yearFromISO(anchor?.death?.dateISO);
+    addTimeline(anchorDeathYear, anchorBirthYear !== null && anchorDeathYear !== null ? anchorDeathYear - anchorBirthYear : null, `Passed away${anchor?.death?.place ? ` in ${anchor.death.place}` : ""}`, "DEAT");
+    timelineRows.sort((a, b) => Number(a[0]) - Number(b[0]));
+    if (timelineRows.length) {
+      children.push(
+        heading("Life Timeline", 2),
+        new Table({
+          columnWidths: [3120, 3120, 3120],
+          width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
+          rows: [
+            new TableRow({
+              children: ["Year", "Age", "Event"].map((t) => new TableCell({
+                width: { size: 3120, type: WidthType.DXA },
+                shading: { type: ShadingType.CLEAR, fill: "1F3864" },
+                margins: { top: 80, bottom: 80, left: 120, right: 120 },
+                children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, color: "FFFFFF" })] })],
+              })),
+            }),
+            ...timelineRows.map((r, idx) => new TableRow({
+              children: r.map((t) => new TableCell({
+                width: { size: 3120, type: WidthType.DXA },
+                shading: { type: ShadingType.CLEAR, fill: idx % 2 === 0 ? "FFFFFF" : "F2F2F2" },
+                margins: { top: 80, bottom: 80, left: 120, right: 120 },
+                children: [new Paragraph({ children: [new TextRun({ text: String(t), font: "Arial", size: 22 })] })],
+              })),
+            })),
+          ],
+        }),
+        new Paragraph({ pageBreakBefore: true }),
+      );
+    }
+
+    const descendantLevels = Array.from(new Set(Array.from(descendantsMap.values()))).sort((a, b) => a - b);
+    for (const level of descendantLevels) {
+      const allLevel = Array.from(descendantsMap.entries())
+        .filter(([, l]) => l === level)
+        .map(([id]) => personById.get(id))
+        .filter(Boolean)
+        .sort((a, b) => (yearFromISO(a?.birth?.dateISO) || 9999) - (yearFromISO(b?.birth?.dateISO) || 9999));
+      const deceasedLevel = allLevel.filter((p) => p?.living !== true);
+      const livingLevel = allLevel.filter((p) => p?.living === true);
+      children.push(heading(descendantLevelLabel(level), 1), body(`Included descendants at this level: ${allLevel.length}`));
+      for (const person of deceasedLevel) {
+        const relation = relationshipSubtitle({ person, personById, familiesById });
+        const lifeStageContext = await getLifeStageContext(person);
+        const { text: narrative } = await getNarrative(person, { lifeStageContext, familiesById, personById }, { refresh: args.refresh, noAi: args.noAi });
+        children.push(heading(displayName(person), 2), ...(relation ? [body(relation)] : []), body(narrative), divider());
+      }
+      if (livingLevel.length) {
+        children.push(
+          heading("Living Family Members (names only)", 2),
+          ...bulletList(livingLevel.map((p) => `${firstName(p)} ${cleanName(p?.name?.surname || "")} — Living`), numberingRef),
+        );
+      }
+      children.push(new Paragraph({ pageBreakBefore: true }));
+    }
+
+    // Back matter
+    const asciiLines = buildAsciiTree({ anchor, ancestorsMap, descendantsMap, personById });
+    children.push(
+      heading("ASCII Family Tree", 1),
+      new Table({
+        columnWidths: [9360],
+        width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 9360, type: WidthType.DXA },
+                shading: { type: ShadingType.CLEAR, fill: "F5F5F5" },
+                margins: { top: 80, bottom: 80, left: 120, right: 120 },
+                children: asciiLines.map(
+                  (line) =>
+                    new Paragraph({
+                      spacing: { after: 40 },
+                      children: [new TextRun({ text: line, font: "Courier New", size: 18 })],
+                    }),
+                ),
+              }),
+            ],
+          }),
+        ],
+      }),
+      new Paragraph({ pageBreakBefore: true }),
+      heading("Index", 1),
+      ...bulletList(
+        includedPeople
+          .slice()
+          .sort((a, b) => normalizeSurname(a?.name?.surname).localeCompare(normalizeSurname(b?.name?.surname)) || displayName(a).localeCompare(displayName(b)))
+          .map((p) => `${displayName(p)} (${yearFromISO(p?.birth?.dateISO) || "—"})`),
+        numberingRef,
+      ),
+    );
+
+    const doc = new Document({
+      styles: {
+        default: {
+          document: {
+            run: { font: "Arial", size: 22 },
+            paragraph: { spacing: { line: 312 } },
+          },
+        },
+      },
+      numbering: {
+        config: [
+          {
+            reference: numberingRef,
+            levels: [{ level: 0, format: LevelFormat.BULLET, text: "•", alignment: AlignmentType.LEFT, style: { paragraph: { indent: { left: 720, hanging: 260 } } } }],
+          },
+        ],
+      },
+      sections: [
+        {
+          properties: { page: { size: { width: PAGE_WIDTH_DXA, height: PAGE_HEIGHT_DXA }, margin: { top: MARGIN_DXA, bottom: MARGIN_DXA, left: MARGIN_DXA, right: MARGIN_DXA } } },
+          footers: { default: buildFooter({ surname: normalizeSurname(anchor?.name?.surname) || "Family" }) },
+          children,
+        },
+      ],
+    });
+    const buffer = await Packer.toBuffer(doc);
+    fs.writeFileSync(outPath, buffer);
+    console.log(`Family book generated: reports/${path.basename(outPath)}`);
+    return;
+  }
 
   const deceasedAll = individuals.filter((p) => !isLiving(p));
   const livingFlaggedAll = individuals.filter((p) => p?.living === true);
@@ -800,8 +1156,6 @@ async function generateBook() {
   let wikimediaImages = 0;
   let aiNarratives = 0;
   let templateNarratives = 0;
-
-  const numberingRef = "book-bullets";
 
   const children = [];
 
@@ -934,11 +1288,13 @@ async function generateBook() {
   for (const g of genNumbers) {
     const bucket = featuredByGen.get(g);
     const allInGen = genBuckets.get(g) || [];
+    let skippedLiving = 0;
+    const usedSidebars = new Set();
     console.log(`Generating Generation ${g} (${allInGen.length} individuals)...`);
     const years = allInGen.map((p) => yearFromISO(p?.birth?.dateISO)).filter((y) => y !== null);
     const minY = years.length ? Math.min(...years) : null;
     const maxY = years.length ? Math.max(...years) : null;
-    const decadeRange = minY !== null && maxY !== null ? `${Math.floor(minY / 10) * 10}s–${Math.floor(maxY / 10) * 10}s` : "—";
+    const decadeRange = generationRangeLabel(g);
     const commonRegion = pickMostCommon(allInGen.map((p) => stateFromPlace(p?.birth?.place || "")));
 
     // Family Homeland block(s) at start of earliest generation where detected
@@ -989,15 +1345,18 @@ async function generateBook() {
           summary = null;
         }
 
-        // Historical context bullets (use funFact)
-        const relevantEvents = events
-          .filter((e) => {
-            const origins = Array.isArray(e?.relevantOrigins) ? e.relevantOrigins : [];
-            const regionLower = regionName.toLowerCase();
-            return origins.some((o) => regionLower.includes(String(o).toLowerCase()));
-          })
-          .filter((e) => (earliest === null || e.endYear >= earliest) && (latest === null || e.startYear <= latest))
-          .slice(0, 5);
+        const relevantContext = [];
+        if (earliest !== null) {
+          const scope = regionKey.startsWith("USA|") ? (regionKey.split("|")[1] || "USA") : (regionKey.split("|")[1] || "global");
+          const layer = regionKey.startsWith("USA|") ? "region" : "country";
+          const c1 = await getContext(earliest, layer, scope, topSurname);
+          const c2 = await getContext(earliest + 20, layer, scope, topSurname);
+          const c3 = await getContext((latest ?? earliest) - 10, "world", "global", topSurname);
+          for (const c of [c1, c2, c3]) {
+            const t = String(c || "").trim();
+            if (t) relevantContext.push(t);
+          }
+        }
 
         children.push(
           heading(`The ${topSurname} Homeland: ${regionName}`, 1),
@@ -1033,7 +1392,7 @@ async function generateBook() {
           body(`${rootsText}${contextText}`),
           heading("What Life Was Like", 2),
           ...bulletList(
-            relevantEvents.length ? relevantEvents.map((e) => e.funFact) : ["No matching historical context found for this region yet."],
+            relevantContext.length ? relevantContext : ["No matching historical context found for this region yet."],
             numberingRef,
           ),
         );
@@ -1071,7 +1430,7 @@ async function generateBook() {
         children.push(
           heading(`Family Members from This Region`, 2),
           new Table({
-            layout: { type: TableLayoutType.FIXED },
+            columnWidths: [2340, 2340, 2340, 2340],
             width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
             rows: [
               new TableRow({
@@ -1108,11 +1467,12 @@ async function generateBook() {
 
     // Chapter title page
     const chapterQuote = (() => {
-      const mid = minY !== null && maxY !== null ? Math.round((minY + maxY) / 2) : null;
-      if (mid === null) return "Did you know? Families often moved because of jobs, land, or safety.";
-      const pick = events.find((e) => mid >= e.startYear && mid <= e.endYear) || events[0];
-      return pick?.funFact || "Did you know? Every generation lived through new inventions and new challenges.";
+      const medianYear = medianBirthYearForPeople(allInGen);
+      if (medianYear === null) return Promise.resolve("Did you know? Families often moved because of jobs, land, or safety.");
+      return getContext(medianYear, "world", "global", `gen-${g}`);
     })();
+    const chapterQuoteText =
+      (await chapterQuote) || "Did you know? Every generation lived through new inventions and new challenges.";
 
     children.push(
       new Paragraph({
@@ -1130,27 +1490,27 @@ async function generateBook() {
       }),
       body(`Individuals in this generation: ${allInGen.length}`),
       body(`Most common birthplace/region: ${commonRegion || "—"}`),
-      shadedBlock({ text: `“${chapterQuote}”`, fill: "FFF9C4", borderColor: "F0C040" }),
+      shadedBlock({ text: `“${chapterQuoteText}”`, fill: "FFF9C4", borderColor: "F0C040" }),
       new Paragraph({ pageBreakBefore: true }),
     );
 
     // Era introduction block
-    const eraEvent = (() => {
-      const mid = minY !== null && maxY !== null ? Math.round((minY + maxY) / 2) : null;
-      if (mid === null) return null;
-      return events.find((e) => mid >= e.startYear && mid <= e.endYear) || null;
+    const eraContext = (() => {
+      const medianYear = medianBirthYearForPeople(allInGen);
+      if (medianYear === null) return Promise.resolve("");
+      return getContext(medianYear, "world", "global", `gen-era-${g}`);
     })();
-    if (eraEvent) {
+    const eraContextText = await eraContext;
+    if (eraContextText) {
       children.push(
         heading("Era Introduction", 2),
-        body(`${eraEvent.event}`),
-        body(`${eraEvent.funFact}`),
+        body(`${eraContextText}`),
         divider(),
       );
     }
 
     // Full spreads (two-column section simulated by short table with 2 cells)
-    const funFactsForGen = events.filter((e) => minY !== null && maxY !== null && e.startYear <= maxY && e.endYear >= minY);
+    const sidebarYearsForGen = minY !== null ? [minY, minY + 10, minY + 20, maxY ?? minY] : [];
     let sidebarCounter = 0;
     const referencedRegionsThisGen = new Set();
     const genPlaceIndex = args.noPlaces ? null : buildGenerationPlaceIndex({ people: allInGen, familiesById, personById });
@@ -1158,18 +1518,20 @@ async function generateBook() {
     let processedFull = 0;
 
     for (const person of fullPeople) {
-      if (person?.living === true) continue;
+      if (person?.living === true) {
+        skippedLiving++;
+        continue;
+      }
       const personSurname = normalizeSurname(person?.name?.surname);
       if (processedFull > 0 && processedFull % 25 === 0) {
         console.log(`  → ${processedFull}/${fullPeople.length} individuals | Gen ${g} | ${personSurname || "UNKNOWN"}`);
       }
 
-      const allPersonEvents = matchEventsForPerson(person, events);
-      const narrativeEvents = selectNarrativeEvents(allPersonEvents);
-      const lifeTimesEvents = selectLifeTimesEvents(allPersonEvents);
+      const lifeStageContext = await getLifeStageContext(person);
+      const lifeTimesEvents = lifeStageBulletsFromContext(lifeStageContext);
       const { text: narrative, source } = await getNarrative(
         person,
-        { events: allPersonEvents, familiesById, personById },
+        { lifeStageContext, familiesById, personById },
         { refresh: args.refresh, noAi: args.noAi },
       );
       if (source === "ollama") aiNarratives++;
@@ -1197,7 +1559,7 @@ async function generateBook() {
               const img = await getCachedOrFetchCommonsImage(query, {
                 birthYear: yearFromISO(person?.birth?.dateISO),
               });
-              if (img.cachePath) {
+              if (img?.cachePath) {
                 imageRun = await imageRunFromFile(img.cachePath, img.ext);
                 wikimediaImages++;
                 caption = `Historic view: ${query}`;
@@ -1211,10 +1573,18 @@ async function generateBook() {
       }
 
       const leftChildren = [];
+      const relationLine = relationshipSubtitle({ person, personById, familiesById });
       leftChildren.push(
         new Paragraph({
           children: [new TextRun({ text: displayName(person), font: "Arial", size: 36, bold: true })],
         }),
+        ...(relationLine
+          ? [
+              new Paragraph({
+                children: [new TextRun({ text: relationLine, font: "Arial", size: 20, italics: true, color: "666666" })],
+              }),
+            ]
+          : []),
         new Paragraph({ children: [new TextRun({ text: lifeLine, font: "Arial", size: 22, color: "666666" })] }),
         divider(),
       );
@@ -1243,7 +1613,7 @@ async function generateBook() {
           children: [new TextRun({ text: "Life & Times", font: "Arial", size: 26, bold: true, color: "2E75B6" })],
         }),
       );
-      const bullets = lifeTimesEvents.map((e) => `${e.event}: ${e.funFact}`).slice(0, 5);
+      const bullets = lifeTimesEvents.slice(0, 5);
       rightChildren.push(...bulletList(bullets.length ? bullets : ["No era facts available yet."], numberingRef));
 
       rightChildren.push(
@@ -1265,18 +1635,18 @@ async function generateBook() {
       );
 
       const spread = new Table({
-        layout: { type: TableLayoutType.FIXED },
+        columnWidths: [3200, 6160],
         width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
         rows: [
             new TableRow({
               children: [
                 new TableCell({
-                  width: { size: 4600, type: WidthType.DXA },
+                  width: { size: 3200, type: WidthType.DXA },
                   margins: { top: 80, bottom: 80, left: 120, right: 120 },
                   children: leftChildren,
                 }),
                 new TableCell({
-                  width: { size: 4760, type: WidthType.DXA },
+                  width: { size: 6160, type: WidthType.DXA },
                   margins: { top: 80, bottom: 80, left: 120, right: 120 },
                   children: rightChildren,
                 }),
@@ -1353,6 +1723,10 @@ async function generateBook() {
             }
 
             const who = (genPlaceIndex?.regionPeople?.get(regionKey) || [])
+              .filter((entry) => {
+                const person = personById.get(entry?.id);
+                return !(person?.living === true);
+              })
               .slice(0, 10)
               .map((p) => `${p.name}${p.year ? ` (b.${p.year})` : ""}`)
               .join(", ");
@@ -1417,9 +1791,12 @@ async function generateBook() {
 
       sidebarCounter++;
       processedFull++;
-      if (sidebarCounter % 4 === 0 && funFactsForGen.length) {
-        const fact = funFactsForGen[sidebarCounter % funFactsForGen.length];
-        children.push(shadedBlock({ text: `Did you know? ${fact.funFact}`, fill: "FFF9C4", borderColor: "F0C040" }));
+      if (sidebarCounter % 4 === 0 && sidebarYearsForGen.length) {
+        const sidebarYear = sidebarYearsForGen[sidebarCounter % sidebarYearsForGen.length];
+        const fact = await getUnusedSidebar(sidebarYear, usedSidebars, `gen-fact-${g}-${sidebarCounter}`);
+        if (fact) {
+          children.push(shadedBlock({ text: `Did you know? ${fact}`, fill: "FFF9C4", borderColor: "F0C040" }));
+        }
       }
 
       // Rate limit AI calls
@@ -1449,7 +1826,7 @@ async function generateBook() {
       children.push(
         heading("Generation Roster (limited details)", 2),
         new Table({
-          layout: { type: TableLayoutType.FIXED },
+          columnWidths: [3120, 3120, 3120],
           width: { size: CONTENT_WIDTH_DXA, type: WidthType.DXA },
           rows: [
             new TableRow({
@@ -1483,14 +1860,15 @@ async function generateBook() {
     }
 
     // Generation summary page
-    const topPlaces = allInGen
+    const summaryPeople = allInGen.filter((p) => p?.living !== true);
+    const topPlaces = summaryPeople
       .map((p) => stateFromPlace(p?.birth?.place || ""))
       .filter(Boolean);
     const top1 = pickMostCommon(topPlaces);
     const top2 = pickMostCommon(topPlaces.filter((x) => x !== top1));
     const top3 = pickMostCommon(topPlaces.filter((x) => x !== top1 && x !== top2));
     const familiesInGen = new Set();
-    for (const p of allInGen) {
+    for (const p of summaryPeople) {
       for (const fid of Array.isArray(p?.familiesAsSpouse) ? p.familiesAsSpouse : []) familiesInGen.add(fid);
     }
 
@@ -1498,13 +1876,14 @@ async function generateBook() {
       new Paragraph({ pageBreakBefore: true }),
       heading(`Generation ${g} Summary`, 1),
       table2Col([
-        ["Individuals", String(allInGen.length)],
+        ["Individuals", String(summaryPeople.length)],
         ["Top places", [top1, top2, top3].filter(Boolean).join(", ") || "—"],
         ["Families represented", String(familiesInGen.size)],
         ["A simple note", "This generation connects family units that shaped the next chapter."],
       ]),
       new Paragraph({ pageBreakBefore: true }),
     );
+    console.log(`Skipped ${skippedLiving} living individuals (privacy)`);
   }
 
   // Back matter — condensed stats
@@ -1530,7 +1909,7 @@ async function generateBook() {
     return { deceasedShown, livingShown };
   })();
 
-  const totalIndividuals = filterDescription ? scopeIndividuals.deceasedShown.length + scopeIndividuals.livingShown.length : individuals.length;
+  const totalIndividuals = filterDescription ? scopeIndividuals.deceasedShown.length : individuals.filter((p) => p?.living !== true).length;
   const totalFamilies = filterDescription ? (() => {
     const famIds = new Set();
     for (const p of scopeIndividuals.deceasedShown) {
@@ -1540,7 +1919,7 @@ async function generateBook() {
     return famIds.size;
   })() : families.length;
   const livingCount = filterDescription ? scopeIndividuals.livingShown.length : individuals.filter(isLiving).length;
-  const deceasedCount = totalIndividuals - livingCount;
+  const deceasedCount = totalIndividuals;
   const genRangeShown = filterDescription ? (genNumbers.length ? `${genNumbers[0]}–${genNumbers[genNumbers.length - 1]}` : "—") : String(maxGen);
 
   children.push(
@@ -1551,6 +1930,7 @@ async function generateBook() {
       ["Total Families", totalFamilies.toLocaleString()],
       ["Living (protected)", livingCount.toLocaleString()],
       ["Deceased", deceasedCount.toLocaleString()],
+      ["Note", "Individual count excludes living people"],
       ["Generations", filterDescription ? genRangeShown : String(maxGen)],
     ]),
     divider(),
